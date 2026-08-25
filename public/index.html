@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DSH 插件目录 · DeepSeek Harness Plugin Hub</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <div class="brand">
+        <span class="logo">🔌</span>
+        <div>
+          <h1>DSH 插件目录</h1>
+          <p class="sub">DeepSeek Harness 可装插件精选 · 中文优先 · 一键复制安装命令</p>
+        </div>
+      </div>
+      <div class="meta" id="meta">加载中…</div>
+    </div>
+  </header>
+
+  <div class="wrap controls">
+    <div class="search">
+      <input id="search" type="search" placeholder="搜索插件名 / 简介 / 标签…" autocomplete="off" />
+    </div>
+    <div class="sort">
+      <label>排序</label>
+      <select id="sort">
+        <option value="stars">Star 最多</option>
+        <option value="updated">最近更新</option>
+        <option value="name">名称 A-Z</option>
+      </select>
+    </div>
+  </div>
+
+  <nav class="wrap chips" id="chips"></nav>
+
+  <main class="wrap grid" id="grid"></main>
+
+  <footer class="wrap foot">
+    <span>数据来源：GitHub <code>topic:dsh-plugin</code> · 每日自动更新</span>
+    <span>安装命令：<code>dsh plugin --profile web add &lt;源&gt;</code></span>
+  </footer>
+
+  <div id="toast" class="toast"></div>
+  <script src="app.js"></script>
+</body>
+</html>

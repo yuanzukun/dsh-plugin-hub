@@ -1,0 +1,58 @@
+[
+  {
+    "full_name": "yjh051108/dsh-routing-suite",
+    "name": "dsh-routing-suite",
+    "owner": { "login": "yjh051108" },
+    "html_url": "https://github.com/yjh051108/dsh-routing-suite",
+    "homepage": "",
+    "description": "dsh-routing-suite — injector + router-standard kit: install the runtime injector first, then the task-aware reasoning-mode router preset (measured P1-P23).",
+    "zh": "DSH 路由套件：注入器 + 任务感知推理模式路由器预设，按场景自动切换推理档位。",
+    "stargazers_count": 6800,
+    "language": "JavaScript",
+    "topics": ["dsh", "ai-agents", "cordis", "deepseek-harness", "dsh-plugin"],
+    "updated_at": "2026-08-24T00:00:00Z",
+    "default_branch": "main"
+  },
+  {
+    "full_name": "anywhere-labs/dsh-desktop",
+    "name": "dsh-desktop",
+    "owner": { "login": "anywhere-labs" },
+    "html_url": "https://github.com/anywhere-labs/dsh-desktop",
+    "homepage": "",
+    "description": "为 DeepSeek Harness (DSH) 插件生态打造的现代化桌面端解决方案。万物皆「插件」，桌面本身也是「插件」。",
+    "zh": "为 DSH 插件生态打造的现代化桌面端壳层，把桌面本身也做成插件。",
+    "stargazers_count": 19700,
+    "language": "TypeScript",
+    "topics": ["desktop", "dsh", "cordis", "deepseek", "deepseek-harness", "dsh-plugin", "cordis-plugin", "dsh-plugin-desktop"],
+    "updated_at": "2026-08-24T00:00:00Z",
+    "default_branch": "main"
+  },
+  {
+    "full_name": "tt-a1i/archify",
+    "name": "archify",
+    "owner": { "login": "tt-a1i" },
+    "html_url": "https://github.com/tt-a1i/archify",
+    "homepage": "",
+    "description": "Agent skill for beautiful, verifiable architecture, workflow, sequence, data-flow, and lifecycle diagrams—self-contained HTML with motion and crisp export.",
+    "zh": "面向 Agent 的画图技能：架构图 / 流程图 / 时序图，输出带动效、可导出的自包含 HTML。",
+    "stargazers_count": 15400,
+    "language": "HTML",
+    "topics": ["opencode", "developer-tools", "diagrams", "software-architecture", "deepseek-harness", "dsh-plugin"],
+    "updated_at": "2026-08-22T00:00:00Z",
+    "default_branch": "main"
+  },
+  {
+    "full_name": "titanwings/distilly",
+    "name": "distilly",
+    "owner": { "login": "titanwings" },
+    "html_url": "https://github.com/titanwings/distilly",
+    "homepage": "",
+    "description": "Distilly — Distill how they think into reusable Skills for any Agent or Bot. Formerly Colleague Skill.",
+    "zh": "把“它们怎么思考”蒸馏成可复用的技能（Skills），供任意 Agent / Bot 调用。",
+    "stargazers_count": 23900,
+    "language": "Python",
+    "topics": ["opencode", "knowledge-distillation", "codex", "deepseek-harness", "dsh-plugin"],
+    "updated_at": "2026-08-24T00:00:00Z",
+    "default_branch": "main"
+  }
+]

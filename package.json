@@ -1,0 +1,14 @@
+{
+  "name": "dsh-plugin-hub",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DeepSeek Harness 插件目录：抓取 GitHub+npm 上的 dsh 插件，中文展示 + 一键复制安装命令。",
+  "scripts": {
+    "update": "node fetch.mjs",
+    "serve": "node scripts/serve.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

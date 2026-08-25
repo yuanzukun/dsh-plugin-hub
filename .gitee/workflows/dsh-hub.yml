@@ -1,0 +1,37 @@
+version: '1.0'
+name: dsh-hub-daily
+displayName: 'DSH 插件目录每日更新'
+description: '每天抓取 GitHub+npm 上的 dsh 插件，重新生成 public/plugins.json 并提交，Gitee Pages 自动重建。'
+
+triggers:
+  trigger: auto
+  schedule:
+    # 北京时间 09:00（Quartz 格式：秒 分 时 日 月 周）
+    - cron: '0 0 9 * * ?'
+
+stages:
+  - name: update
+    displayName: '抓取并更新插件数据'
+    strategy: naturally
+    trigger: auto
+    executor: []
+    steps:
+      - step: checkout@1
+        name: checkout
+        displayName: '检出代码'
+        with:
+          ref: master
+      - step: build@nodejs
+        name: build_nodejs
+        displayName: 'Nodejs 构建'
+        nodeVersion: 20.11.0
+        commands:
+          - 'git config user.email "bot@dsh-hub.local"'
+          - 'git config user.name "dsh-hub-bot"'
+          - 'npm config set registry https://registry.npmmirror.com'
+          - 'node fetch.mjs'
+          - 'git add public/plugins.json'
+          - 'git commit -m "chore: daily plugin update $(date +%F)" || echo "no changes"'
+          - 'git push ${PUSH_URL} HEAD:master'
+        caches:
+          - ~/.npm

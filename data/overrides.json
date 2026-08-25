@@ -1,0 +1,122 @@
+{
+  "_comment": "人工策展区：重新运行 fetch.mjs 时这里的设置永不被自动数据覆盖。patch 的键为 owner/repo。",
+  "forceExclude": [
+    "deepseek-ai/deepseek-harness",
+    "awesome-dsh-plugin/awesome-dsh-plugin"
+  ],
+  "forceInclude": [],
+  "patch": {
+    "zhu1090093659/dsh-web": {
+      "category": "界面与体验",
+      "zh": "DSH Web 插件聚合生态包，经创意工坊 dsh-market.com 一键分发安装。"
+    },
+    "xiaobright/dsh-anchored-standard": {
+      "category": "模型与推理",
+      "zh": "两阶段 DSH 预设：先极简引导启动，再加载完整 Standard 工具集（Project2 98/99）。"
+    },
+    "liustack/modlens": {
+      "category": "工具与能力",
+      "zh": "DSH 首个视觉插件，为纯文本模型外挂视觉：粘贴图片即得结构化 JSON 证据（OCR/版面/语义）。"
+    },
+    "omdsh-dev/DSH-better-sidebar": {
+      "category": "界面与体验",
+      "zh": "开放侧边栏底座，支持三方注册新页面；内置文件编辑/终端/侧边对话/Git/子代理。"
+    },
+    "ccch1mneyyy/dsh-TUI": {
+      "category": "工具与能力",
+      "zh": "官方公众号收录的 TUI 补位插件：鲸鱼顶栏、实时状态、流式思考、双击 Esc 回滚。"
+    },
+    "dsh-market/dsh-market": {
+      "category": "界面与体验",
+      "zh": "DSH 内置可视化插件市场：浏览、搜索、一键安装。"
+    },
+    "GanyuanRan/Aegis": {
+      "category": "技能与智能体",
+      "zh": "让 AI 编码 Agent 具备架构感知：基线优先、证据校验、漂移检查，长任务更安全。"
+    },
+    "dsh-tauri-desk/deepseek-harness-desktop": {
+      "category": "界面与体验",
+      "zh": "DSH Tauri 桌面版，仅 5MB 安装包、零环境配置、预置插件，跨 Win/macOS/Linux。"
+    },
+    "bowenliang123/dsh-context": {
+      "category": "记忆与上下文",
+      "zh": "DSH 上下文可视化插件：面板+浏览器+命令，透视上下文组成、演进、压缩与剪枝。"
+    },
+    "ysr666/dsh-vision-router": {
+      "category": "工具与能力",
+      "zh": "给纯文本 DSH Agent 加眼睛：内置免费视觉链 + 像素级视觉工具，一行安装、无需 Python。"
+    },
+    "NanmiCoder/dsh-agent-teams": {
+      "category": "技能与智能体",
+      "zh": "为 DeepSeek Harness 提供多 Agent 团队协作（AgentTeams）能力。"
+    },
+    "MeteorNOX/DeepSeek-Balance-Whale-Widget": {
+      "category": "界面与体验",
+      "zh": "住在 DSH 界面右下角的小鲸鱼娘，实时盯 DeepSeek 账户余额，可拖拽吸附。"
+    },
+    "Anionex/dsh-vision-toolkit": {
+      "category": "工具与能力",
+      "zh": "为纯文本模型设计的视觉工具箱：图片问答、长截图 OCR、UI 还原、像素对比等。"
+    },
+    "toby-bridges/api-relay-audit": {
+      "category": "集成与连接",
+      "zh": "本地安全审计 AI API 中继/代理：检测提示注入、模型替换、工具改写与 Web3 钱包风险。"
+    },
+    "xmanrui/dsh-im": {
+      "category": "集成与连接",
+      "zh": "把 IM 机器人接入 DSH（飞书/微信/钉钉/企微/QQ/Slack/Telegram/Discord/WhatsApp）。"
+    },
+    "sandbaseai/sandbase-harness": {
+      "category": "工具与能力",
+      "zh": "本地优先的 Agent 运行时：沙箱会话、MCP 工具、记忆、凭证与审计回放，自托管多模型。"
+    },
+    "vibeinging/dsh-desktop": {
+      "category": "界面与体验",
+      "zh": "DSH 桌面工作区：本地 AI 桌面端，管理会话、项目、文件、联网研究与 Office 产物。"
+    },
+    "shaobeichen/dsh-pocket": {
+      "category": "界面与体验",
+      "zh": "把 DSH 装进口袋：电脑跑 dsh web，手机扫码即同步访问（局域网+公网同屏）。"
+    },
+    "superdesigndev/treg": {
+      "category": "工具与能力",
+      "zh": "Agent 工具的 OpenRouter：统一 API Key 与凭证代理、注册与分发。"
+    },
+    "adoresever/graph-memory": {
+      "category": "记忆与上下文",
+      "zh": "DSH/OpenClaw 知识图谱记忆插件：从对话抽取结构化三元组，压缩上下文 75%。"
+    },
+    "Nagi-ovo/dsh-ads": {
+      "category": "界面与体验",
+      "zh": "整蛊插件：把 DSH Web 界面变成 2005 年门户网站（假广告/小游戏/弹窗）。"
+    },
+    "mnemon-dev/mnemon": {
+      "category": "记忆与上下文",
+      "zh": "LLM 监督的持久记忆：图式召回、跨会话知识，单文件二进制，兼容 DSH/Claude Code/OpenClaw。"
+    },
+    "fufankeji/deepseek-harness-studio": {
+      "category": "界面与体验",
+      "zh": "DSH 零代码桌面端：一键启动，内置插件发现、热点推送、安装管理与视觉增强。"
+    },
+    "FSMargoo/dsh-at-file": {
+      "category": "工具与能力",
+      "zh": "Codex 风格 @file 提及：在输入框搜索工作区文件并附上路径到提示词。"
+    },
+    "superdesigndev/superdesign-skill": {
+      "category": "界面与体验",
+      "zh": "面向编码 Agent 的设计技能：把 AI 生成的 UI 变成可交付、有审美的前端。"
+    },
+    "Lum1104/dsh-browser": {
+      "category": "工具与能力",
+      "zh": "Chrome 侧边栏扩展，让 DSH 直接操控你的浏览器，无需视觉能力。"
+    },
+    "Ikalus1988/MisakaNet": {
+      "category": "技能与智能体",
+      "zh": "零依赖、git 托管的微课程库，让 Agent 异步共享并检索已验证的排障经验。"
+    },
+    "anywhere-labs/dsh-desktop": {
+      "category": "界面与体验",
+      "zh": "为 DSH 插件生态打造的现代化桌面端壳层，把桌面本身也做成插件。"
+    }
+  }
+}
