@@ -1,0 +1,50 @@
+# 每日自动构建 dsh-plugin-hub 数据：
+#   1. fetch.mjs                      → public/plugins.json（hub 网页数据）
+#   2. scripts/fetch-cards-snapshot.mjs → public/cards-snapshot.json（市场快照，客户端 SNAPSHOT_URLS 主源）
+# 产物直接提交回 master，jsDelivr（@master）自动生效（CDN 分支缓存 TTL 约 12h）。
+name: daily-snapshot
+
+on:
+  schedule:
+    - cron: '30 18 * * *' # UTC 18:30 = 北京时间每日 02:30
+  workflow_dispatch: {} # 支持手动触发
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-snapshot
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 构建插件目录 plugins.json（GitHub topic 主源 + npm keywords 补充）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node fetch.mjs
+
+      - name: 构建市场快照 cards-snapshot.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/fetch-cards-snapshot.mjs
+
+      - name: 提交产物回 master
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data public/plugins.json public/cards-snapshot.json
+          if git diff --cached --quiet; then
+            echo "无变更，跳过提交"
+          else
+            git commit -m "chore: daily snapshot $(date -u +'%Y-%m-%d')"
+            git push
+          fi
