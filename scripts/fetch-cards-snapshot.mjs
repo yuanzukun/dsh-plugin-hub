@@ -47,14 +47,43 @@ const ghFromUrl = (u) => {
 };
 
 // ---- 源 A：npm keywords:dsh-plugin ----
+// CI 数据中心 IP 会被 npm registry search 限流（429）：退避重试 + 连续失败切 npmmirror 镜像
+let NPM_HOST_IDX = 0; // 跨页保持：一旦切换镜像，后续分页沿用
+const NPM_HOSTS = ['registry.npmjs.org', 'registry.npmmirror.com'];
+async function searchPage(from, SIZE) {
+  for (let attempt = 1; ; attempt++) {
+    const host = NPM_HOSTS[NPM_HOST_IDX];
+    let r;
+    try {
+      r = await fetch(`https://${host}/-/v1/search?text=keywords:dsh-plugin&size=${SIZE}&from=${from}`,
+        { signal: AbortSignal.timeout(20000) });
+    } catch (e) { // 超时/网络错误也走退避
+      if (attempt >= 6) throw e;
+      console.log(`npm search ${e.name}（from=${from}）第 ${attempt} 次重试，5s 后`);
+      await sleep(5000);
+      continue;
+    }
+    if (r.ok) return r.json();
+    if (r.status === 429 || r.status >= 500) {
+      if (attempt >= 6) throw new Error('npm search HTTP ' + r.status + '（重试耗尽）');
+      const retryAfter = Number(r.headers.get('retry-after')) || 0;
+      const waitMs = Math.min((retryAfter || Math.pow(2, attempt) * 3) * 1000, 90000);
+      console.log(`npm search HTTP ${r.status}（from=${from}，host=${host}）${Math.round(waitMs / 1000)}s 后第 ${attempt} 次重试`);
+      if (attempt >= 3 && NPM_HOST_IDX === 0) {
+        NPM_HOST_IDX = 1;
+        console.log('→ 连续 429/5xx，切换 npmmirror 镜像继续');
+      }
+      await sleep(waitMs);
+      continue;
+    }
+    throw new Error('npm search HTTP ' + r.status);
+  }
+}
 async function fetchNpm() {
   const out = new Map();
   const SIZE = 250;
   for (let from = 0; ; from += SIZE) {
-    const r = await fetch(`https://registry.npmjs.org/-/v1/search?text=keywords:dsh-plugin&size=${SIZE}&from=${from}`,
-      { signal: AbortSignal.timeout(15000) });
-    if (!r.ok) throw new Error('npm search HTTP ' + r.status);
-    const d = await r.json();
+    const d = await searchPage(from, SIZE);
     const objs = d.objects || [];
     for (const o of objs) {
       const p = o.package || {};
