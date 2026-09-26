@@ -7,6 +7,7 @@ name: daily-snapshot
 on:
   schedule:
     - cron: '30 18 * * *' # UTC 18:30 = 北京时间每日 02:30
+    - cron: '30 6 * * *'  # UTC 06:30 = 北京时间每日 14:30（0.8.7 R1 提频：构建间隔 24h → 12h）
   workflow_dispatch: {} # 支持手动触发
 
 permissions:
