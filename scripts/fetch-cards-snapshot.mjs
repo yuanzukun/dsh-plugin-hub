@@ -121,17 +121,20 @@ async function fetchSeeds() {
   for (const name of SEED_PACKAGES) {
     for (let attempt = 1; ; attempt++) {
       try {
-        const r = await fetch(`https://registry.npmmirror.com/${encodeURIComponent(name)}/latest`, { signal: AbortSignal.timeout(10000) });
+        const r = await fetch(`https://registry.npmmirror.com/${encodeURIComponent(name)}`, { signal: AbortSignal.timeout(20000) });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const m = await r.json();
         if (!m.name) throw new Error('manifest 无包名');
+        // 0.9.1：改拉完整 packument（/latest 无 time 字段）→ time[latest] = 最新版发布时间，
+        // seed-only 条目（GitHub 侧被 ★>=3 门槛滤掉）也能带上卡片「更新于」时间。
+        const latestTag = m['dist-tags'] && m['dist-tags'].latest;
         out.set(m.name, {
           npm: m.name,
           name: m.name,
-          version: m.version || '',
+          version: latestTag || m.version || '',
           description: (m.description || '').slice(0, 500),
           topics: normTopics(m.keywords),
-          updated_at: '', // /latest 无发布时间；merge 时由 GitHub 侧补，或留空
+          updated_at: (m.time && latestTag && m.time[latestTag]) || '',
           full_name: ghFromUrl(m.repository && (typeof m.repository === 'string' ? m.repository : m.repository.url)),
           stargazers_count: 0,
           source: 'npm',
@@ -269,8 +272,9 @@ function merge(npmMap, ghMap) {
     merged.set('gh:' + fn, g);
   }
   for (const [pn, n] of npmMap) {
-    const ghKey = n.full_name ? 'gh:' + n.full_name : null;
-    const g = ghKey ? ghMap.get(ghKey) : null;
+    // 0.9.1 修复：ghMap 的 key 是裸 full_name（harvestGithub/--from-json 均无 'gh:' 前缀），
+    // 上一版误查 'gh:' + full_name 导致归并永远 miss（914 条 both 将分裂、npm 条目 stars/topics 降级）。
+    const g = n.full_name ? ghMap.get(n.full_name) : null;
     if (g) {
       // 每包一条目，仓库信息富化（不删除、不覆盖其他包的条目）
       merged.set('npm:' + pn, {
