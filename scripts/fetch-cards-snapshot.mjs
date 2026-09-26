@@ -107,6 +107,46 @@ async function fetchNpm() {
   return out;
 }
 
+// ---- 源 A+：种子补录（绕过 search 索引延迟与 GitHub 质量门槛）----
+// 两个已知漏录场景（2026-09-26 实测 dsh-plugin-cards@0.8.9 双源全漏）：
+//   ① npm search 索引对新发布包有数小时~数天延迟（发布 19 分钟后 search 端点 0 命中）；
+//   ② GitHub 源 B 有 ★>=3 + 12mo 质量门槛 + 需 repo 自行打 topic。
+// 种子清单按包名直拉 npmmirror /latest manifest（无索引延迟、国内可达、CORS ✓），必进快照。
+const SEED_PACKAGES = [
+  'dsh-plugin-cards', // 社区目录/安装卡片插件本体
+  'dsh-plugin',       // 插件管理器
+];
+async function fetchSeeds() {
+  const out = new Map();
+  for (const name of SEED_PACKAGES) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const r = await fetch(`https://registry.npmmirror.com/${encodeURIComponent(name)}/latest`, { signal: AbortSignal.timeout(10000) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const m = await r.json();
+        if (!m.name) throw new Error('manifest 无包名');
+        out.set(m.name, {
+          npm: m.name,
+          name: m.name,
+          version: m.version || '',
+          description: (m.description || '').slice(0, 500),
+          topics: normTopics(m.keywords),
+          updated_at: '', // /latest 无发布时间；merge 时由 GitHub 侧补，或留空
+          full_name: ghFromUrl(m.repository && (typeof m.repository === 'string' ? m.repository : m.repository.url)),
+          stargazers_count: 0,
+          source: 'npm',
+        });
+        console.log(`seed: +${m.name}@${m.version}`);
+        break;
+      } catch (e) {
+        if (attempt >= 3) { console.log(`seed: ${name} 拉取失败（${e.message}），跳过`); break; }
+        await sleep(3000);
+      }
+    }
+  }
+  return out;
+}
+
 // ---- 源 B：GitHub topic:dsh-plugin 分桶收割 ----
 function searchUrl(bucket, page) {
   const pushedAfter = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
@@ -328,7 +368,18 @@ if (fromIdx > -1) {
 } else {
   ghMap = await harvestGithub();
 }
-if (!args.includes('--github-only')) npmMap = await fetchNpm();
+if (!args.includes('--github-only')) {
+  npmMap = await fetchNpm();
+  // 种子补录：search 已命中的以 search 为准（updated_at 更全），漏录的种子注入
+  const seedMap = await fetchSeeds();
+  let seeded = 0;
+  for (const [k, v] of seedMap) {
+    if (npmMap.has(k)) continue;
+    npmMap.set(k, v);
+    seeded++;
+  }
+  console.log(`seed 补录: +${seeded}/${SEED_PACKAGES.length}`);
+}
 
 const items = [...merge(npmMap, ghMap).values()];
 console.log(`合并后 ${items.length} 条（npm ${npmMap.size} / github ${ghMap.size}）`);
