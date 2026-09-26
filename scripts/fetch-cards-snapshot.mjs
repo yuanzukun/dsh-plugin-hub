@@ -251,25 +251,37 @@ async function harvestGithub() {
 }
 
 // ---- 合并双源（github full_name ↔ npm links.repository 关联）----
+// 0.9.0 修复（2026-09-26 实测）：monorepo 子包（如 @szx-a/dsh-layered-memory-architecture，
+// repository 指向 deepseek-ai/deepseek-harness）按 URL 归并时 N:1 被当 1:1，后者覆盖前者 →
+// 官方主仓条目 npm 字段被最后一个子包污染。改为：每个 npm 包独立成条（可装单元），
+// GitHub 仓库信息（stars/topics/updated_at）作富化；仓库无 npm 包时保留 git-only 条目。
+/** 宿主本体仓库：不是插件，不作为目录条目（其 npm 子包仍经源 A 入列并富化仓库信息） */
+const HOST_REPOS = new Set(['deepseek-ai/deepseek-harness']);
+/** 排序：可装优先（installable false 沉底），同级按 stars —— 用户第一屏都是能装的 */
+const sortItems = (items) => {
+  const rank = (x) => (x.installable === false ? 1 : 0);
+  return items.sort((a, b) => rank(a) - rank(b) || b.stargazers_count - a.stargazers_count);
+};
 function merge(npmMap, ghMap) {
   const merged = new Map();
-  for (const [fn, g] of ghMap) merged.set('gh:' + fn, g);
+  for (const [fn, g] of ghMap) {
+    if (HOST_REPOS.has(fn.toLowerCase())) continue; // 宿主本体不作为插件条目
+    merged.set('gh:' + fn, g);
+  }
   for (const [pn, n] of npmMap) {
     const ghKey = n.full_name ? 'gh:' + n.full_name : null;
-    const g = ghKey ? merged.get(ghKey) : null;
+    const g = ghKey ? ghMap.get(ghKey) : null;
     if (g) {
-      // 双渠道命中：npm 提供精确 version + 可靠安装通道；github 提供 stars/topics
-      merged.set(ghKey, {
-        ...g,
-        npm: n.npm,
-        version: n.version || g.version,
-        source: 'both',
-        description: g.description || n.description,
+      // 每包一条目，仓库信息富化（不删除、不覆盖其他包的条目）
+      merged.set('npm:' + pn, {
+        ...n,
+        stargazers_count: g.stargazers_count || 0,
         topics: g.topics.length ? g.topics : n.topics,
         updated_at: [g.updated_at, n.updated_at].sort().pop() || '',
+        source: 'both',
       });
     } else {
-      merged.set(ghKey || 'npm:' + pn, { ...n });
+      merged.set('npm:' + pn, { ...n });
     }
   }
   return merged;
@@ -385,7 +397,7 @@ const items = [...merge(npmMap, ghMap).values()];
 console.log(`合并后 ${items.length} 条（npm ${npmMap.size} / github ${ghMap.size}）`);
 if (!args.includes('--skip-probe')) await probeAll(items);
 
-items.sort((a, b) => b.stargazers_count - a.stargazers_count);
+sortItems(items);
 const out = { version: 2, builtAt: Date.now(), quality: true, total: items.length, items };
 await writeFile(OUT, JSON.stringify(out));
 const inst = items.filter((x) => x.installable === true).length;
