@@ -1,7 +1,8 @@
 # 每日自动构建 dsh-plugin-hub 数据：
 #   1. fetch.mjs                      → public/plugins.json（hub 网页数据）
 #   2. scripts/fetch-cards-snapshot.mjs → public/cards-snapshot.json（市场快照，客户端 SNAPSHOT_URLS 主源）
-# 产物直接提交回 master，jsDelivr（@master）自动生效（CDN 分支缓存 TTL 约 12h）。
+# 产物直接提交回 master；jsDelivr（@master）分支缓存 TTL 约 12h，故提交后主动 purge CDN，
+# 用户侧延迟从最长 ~12h 降到分钟级（2026-09-30：此前曾因无 purge 导致市场整天显示昨日旧快照）。
 name: daily-snapshot
 
 on:
@@ -49,3 +50,12 @@ jobs:
             git commit -m "chore: daily snapshot $(date -u +'%Y-%m-%d')"
             git push
           fi
+
+      - name: 清除 jsDelivr CDN 缓存（免鉴权 purge 接口，秒级生效）
+        run: |
+          for path in public/cards-snapshot.json public/plugins.json; do
+            echo "purge $path"
+            curl -sf --max-time 30 "https://purge.jsdelivr.net/gh/yuanzukun/dsh-plugin-hub@master/$path" \
+              || echo "::warning::purge $path 失败（不影响产物，缓存最迟 ~12h 自然过期）"
+            sleep 2
+          done
