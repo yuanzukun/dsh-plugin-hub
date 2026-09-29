@@ -37,7 +37,7 @@
 import { writeFile, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
-import { satisfies } from 'semver';
+import { satisfies, validRange } from 'semver';
 
 const ROOT = dirname(fileURLToPath(import.meta.url)) + '/..';
 const OUT = join(ROOT, 'public', 'cards-snapshot.json');
@@ -319,8 +319,12 @@ function manifestCompliance(m) {
   const engine = dsh && typeof dsh.engine === 'string' ? dsh.engine.trim() : '';
   let engineCompat = null;
   if (engine) {
-    try { engineCompat = satisfies(HOST_ENGINE_VERSION, engine, { includePrerelease: true }) ? 1 : 0; }
-    catch { engineCompat = null; } // 非法 range 不判不兼容，交给宿主安装时终审
+    // 1.2.1 修复：官方惯例 engine 写作 "dsh >=x.y.z"，须剥掉 "dsh" 前缀再判；
+    // 且 semver.satisfies 对非法 range 不抛异常而是返回 false（catch 兜底无效）——必须先 validRange 校验。
+    const range = engine.replace(/^dsh\s*/i, '').trim();
+    engineCompat = validRange(range, { includePrerelease: true })
+      ? (satisfies(HOST_ENGINE_VERSION, range, { includePrerelease: true }) ? 1 : 0)
+      : null; // 非法 range 不判不兼容，交给宿主安装时终审
   }
   let metaScore = 0;
   const exp = (m && m.exports) || {};
