@@ -51,17 +51,30 @@ git push -u origin master
 
 > 没有 Agnes Key 也能跑：只是新插件没有自动中文，已有的中文来自 `data/overrides.json` 策展。
 
+## 市场快照（cards-snapshot.json，供 dsh-plugin-cards 内置市场消费）
+
+由 GitHub Actions `daily-snapshot.yml` 每日两次（北京时间 02:30 / 14:30，GitHub 常延迟数小时）自动构建并提交回 master，jsDelivr（@master）自动生效（分支缓存约 12h）：
+
+- 口径：`topic:dsh-plugin`（★ 不限 + 近 12 个月 + 含 dsh，完整覆盖官方 topic 页）+ npm `keywords:dsh-plugin` 双源归并
+- 分层合规快筛（schema v3）：`dsh.bundle` 硬门禁（installable）→ `dsh.engine` 与桌面端 0.2.0-rc.2 semver 兼容判定（engineCompat，非法 range 一律不判不兼容）→ 展示三件套 metaScore（仅排序）
+- 借星防护：npm 条目仅当 repository 指向 topic 收割到的仓库才合并富化；宿主本体仓（deepseek-ai/deepseek-harness）不借星
+- 手动重建：`node scripts/fetch-cards-snapshot.mjs`（全量，约 12 分钟起）或 `--skip-probe` 快速刷新；`workflow_dispatch` 可在 GitHub Actions 页手动触发云端构建
+
 ## 文件结构
 
 ```
 fetch.mjs                  抓取 + 过滤 + 翻译 + 合并脚本（零依赖，Node 20+）
+scripts/fetch-cards-snapshot.mjs   市场快照构建（双源发现 + 分层合规快筛，schema v3）
 data/overrides.json        人工策展区：分类/中文名/安装命令修正（重跑不丢）
 data/seed.json             离线兜底种子（实时抓取失败时回退）
+data/probe-cache.json      快筛断点缓存（schema v2，7 天有效，随 master 提交）
 public/index.html          前端（搜索/分类/排序/复制安装命令，分页 60/页）
 public/app.js
 public/style.css
 public/plugins.json        生成的数据（被 Gitee Pages 托管）
-.gitee/workflows/dsh-hub.yml   Gitee Go 每日定时流水线
+public/cards-snapshot.json 市场快照（dsh-plugin-cards 客户端 SNAPSHOT_URLS 主源）
+.gitee/workflows/dsh-hub.yml       Gitee Go 每日定时流水线（plugins.json，北京 09:00）
+.github/workflows/daily-snapshot.yml   GitHub Actions 每日两次（北京 02:30/14:30）：plugins.json + cards-snapshot.json
 ```
 
 ## 加新插件 / 改分类
