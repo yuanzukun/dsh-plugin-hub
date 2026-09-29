@@ -1,13 +1,16 @@
 // fetch-cards-snapshot.mjs — 为 dsh-plugin-cards 构建全量快照（schema v2，双源发现 + dsh.bundle 快筛 + 版本号）。
 //
-// 数据口径（0.6.0，按官方要求出发）：
+// 数据口径（1.1.0，按官方要求出发）：
 //   官方无插件注册表；「符合官方要求可安装」的唯一权威标准是宿主 app-boot 硬门禁：
 //   package.json 必须声明 dsh.bundle（缺失拒绝安装）+ semver version + dsh.engine 兼容。
 //   发现层双源：
 //     源 A（主力）: npm keywords:dsh-plugin —— 天然带版本号、天然可安装包形态（6091+）
-//     源 B:        GitHub topic:dsh-plugin（质量口径 ★>=3 + 12mo + dsh kw，3055）—— git 安装通道 + stars/topics
+//     源 B:        GitHub topic:dsh-plugin（质量口径 ★>=0 + 12mo + dsh kw）—— git 安装通道 + stars/topics
+//                  1.1.0：★>=3 → ★>=0（用户决策 2026-09-30：目录须完整覆盖官方 topic 页，不按星数筛）。
 //   快筛：npm 包读 registry <pkg>/latest 的完整 manifest（含自定义 dsh 字段）；git 仓库读 raw package.json。
-//   真机门禁（dsh-plugin-hub-verify）为终审层，后续接入，本脚本预留 verified 字段。
+//   归并校验（1.1.0）：npm 条目仅当 repository 指向「源 B 收割到的 topic 仓库」才合并富化
+//   （stars/topics/updated_at，source=both）；指向宿主本体仓（HOST_REPOS）的一律视为无仓库
+//   （不借官方主仓星数冒充出品）。source=npm 的条目 = 不在官方 topic 页，由客户端默认视图隐藏。
 //
 // 产出 public/cards-snapshot.json：
 //   { version:2, builtAt, quality:true, total,
@@ -110,7 +113,7 @@ async function fetchNpm() {
 // ---- 源 A+：种子补录（绕过 search 索引延迟与 GitHub 质量门槛）----
 // 两个已知漏录场景（2026-09-26 实测 dsh-plugin-cards@0.8.9 双源全漏）：
 //   ① npm search 索引对新发布包有数小时~数天延迟（发布 19 分钟后 search 端点 0 命中）；
-//   ② GitHub 源 B 有 ★>=3 + 12mo 质量门槛 + 需 repo 自行打 topic。
+//   ② GitHub 源 B 有 12mo 更新门槛 + 需 repo 自行打 topic。
 // 种子清单按包名直拉 npmmirror /latest manifest（无索引延迟、国内可达、CORS ✓），必进快照。
 const SEED_PACKAGES = [
   'dsh-plugin-cards', // 社区目录/安装卡片插件本体
@@ -153,11 +156,11 @@ async function fetchSeeds() {
 // ---- 源 B：GitHub topic:dsh-plugin 分桶收割 ----
 function searchUrl(bucket, page) {
   const pushedAfter = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-  const lo = bucket.smin ?? 3;
+  const lo = bucket.smin ?? 0; // 1.1.0：★>=0 = 不限星数（lo 为 0 时不发 stars 限定符）
   const hi = bucket.smax ?? null;
   let q = 'topic:dsh-plugin';
-  if (lo !== null && hi !== null) q += ` stars:${lo}..${hi}`;
-  else if (lo !== null) q += ` stars:>=${lo}`;
+  if (lo !== null && lo > 0 && hi !== null) q += ` stars:${lo}..${hi}`;
+  else if (lo !== null && lo > 0) q += ` stars:>=${lo}`;
   else if (hi !== null) q += ` stars:<=${hi}`;
   // ⚠️ 同类型限定符后者覆盖前者（实测）→ 基础 pushedAfter 与分桶 pushed 必须合并成单一区间
   const pmin = [pushedAfter, bucket.pmin].filter(Boolean).sort().pop(); // 取更晚（更严格）下界
@@ -211,7 +214,7 @@ async function harvestGithub() {
     const last = await ghApi(searchUrl(b, 10));
     const items10 = last ? last.items || [] : [];
     const s = items10.length ? items10[items10.length - 1].stargazers_count : 0;
-    const lo = b.smin ?? 3;
+    const lo = b.smin ?? 0;
     if (s > lo) {
       await bucket({ ...b, smax: s - 1 }, depth + 1);
       await sleep(PAGE_MS);
@@ -274,7 +277,12 @@ function merge(npmMap, ghMap) {
   for (const [pn, n] of npmMap) {
     // 0.9.1 修复：ghMap 的 key 是裸 full_name（harvestGithub/--from-json 均无 'gh:' 前缀），
     // 上一版误查 'gh:' + full_name 导致归并永远 miss（914 条 both 将分裂、npm 条目 stars/topics 降级）。
-    const g = n.full_name ? ghMap.get(n.full_name) : null;
+    // 1.1.0 校验收紧：仅当 repository 指向源 B（topic 收割）里的「非宿主本体」仓库才归并富化；
+    // 指向宿主本体仓（如 monorepo 子包/误填 repository 的包）一律视为无 GitHub 仓库：
+    // 清空 full_name、不借官方主仓星数（防「借 237k★ 置顶冒充官方出品」），source 保持 npm
+    //（不在官方 topic 页 → 客户端默认视图隐藏）。
+    const pointsToHost = n.full_name && HOST_REPOS.has(n.full_name.toLowerCase());
+    const g = n.full_name && !pointsToHost ? ghMap.get(n.full_name) : null;
     if (g) {
       // 每包一条目，仓库信息富化（不删除、不覆盖其他包的条目）
       merged.set('npm:' + pn, {
@@ -284,6 +292,8 @@ function merge(npmMap, ghMap) {
         updated_at: [g.updated_at, n.updated_at].sort().pop() || '',
         source: 'both',
       });
+    } else if (pointsToHost) {
+      merged.set('npm:' + pn, { ...n, full_name: '', stargazers_count: 0, source: 'npm' });
     } else {
       merged.set('npm:' + pn, { ...n });
     }
