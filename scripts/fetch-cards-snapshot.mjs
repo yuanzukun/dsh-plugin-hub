@@ -1,6 +1,6 @@
-// fetch-cards-snapshot.mjs — 为 dsh-plugin-cards 构建全量快照（schema v2，双源发现 + dsh.bundle 快筛 + 版本号）。
+// fetch-cards-snapshot.mjs — 为 dsh-plugin-cards 构建全量快照（schema v3，双源发现 + 分层合规快筛）。
 //
-// 数据口径（1.1.0，按官方要求出发）：
+// 数据口径（1.2.0，按官方要求出发）：
 //   官方无插件注册表；「符合官方要求可安装」的唯一权威标准是宿主 app-boot 硬门禁：
 //   package.json 必须声明 dsh.bundle（缺失拒绝安装）+ semver version + dsh.engine 兼容。
 //   发现层双源：
@@ -8,13 +8,20 @@
 //     源 B:        GitHub topic:dsh-plugin（质量口径 ★>=0 + 12mo + dsh kw）—— git 安装通道 + stars/topics
 //                  1.1.0：★>=3 → ★>=0（用户决策 2026-09-30：目录须完整覆盖官方 topic 页，不按星数筛）。
 //   快筛：npm 包读 registry <pkg>/latest 的完整 manifest（含自定义 dsh 字段）；git 仓库读 raw package.json。
+//   1.2.0 分层合规（L2 引擎兼容 + L3 展示合规，官方规则口径）：
+//     engineCompat: dsh.engine 与桌面端运行时（HOST_ENGINE_VERSION）semver 相交判定
+//                   （1=兼容 / 0=不兼容 / null=未声明或解析失败，客户端只过滤 0）；
+//     metaScore:    0.2.0 展示规范三件套计分（icon / exports ./locale/* / exports ./package.json，0-3），
+//                   仅参与排序权重，不做过滤；
+//     探针缓存 schema v2（新增 engine/engineCompat/metaScore 字段），旧缓存条目自动重探。
 //   归并校验（1.1.0）：npm 条目仅当 repository 指向「源 B 收割到的 topic 仓库」才合并富化
 //   （stars/topics/updated_at，source=both）；指向宿主本体仓（HOST_REPOS）的一律视为无仓库
 //   （不借官方主仓星数冒充出品）。source=npm 的条目 = 不在官方 topic 页，由客户端默认视图隐藏。
 //
 // 产出 public/cards-snapshot.json：
-//   { version:2, builtAt, quality:true, total,
-//     items:[{ full_name, npm, name, version, installable, source, stargazers_count, updated_at, description, topics }] }
+//   { version:3, builtAt, quality:true, total,
+//     items:[{ full_name, npm, name, version, installable, source, stargazers_count, updated_at, description, topics,
+//              engine, engineCompat, metaScore }] }
 //   installable: true（声明 dsh.bundle）/ false（未声明）/ null（探测失败，客户端按未校验显示）
 //
 // 用法：
@@ -30,11 +37,14 @@
 import { writeFile, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
+import { satisfies } from 'semver';
 
 const ROOT = dirname(fileURLToPath(import.meta.url)) + '/..';
 const OUT = join(ROOT, 'public', 'cards-snapshot.json');
 const PROBE_CACHE = join(ROOT, 'data', 'probe-cache.json');
 const PROBE_TTL_MS = 7 * 24 * 3600 * 1000;
+// 1.2.0 引擎兼容判定的宿主基准版本（与 DSH Desktop 运行时 desktopVersion 对齐，发版时同步更新）
+const HOST_ENGINE_VERSION = '0.2.0-rc.2';
 
 const TOKEN = process.env.GITHUB_TOKEN || '';
 const GH_HEADERS = { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-hub-snapshot' };
@@ -301,7 +311,26 @@ function merge(npmMap, ghMap) {
   return merged;
 }
 
-// ---- 快筛：dsh.bundle 声明 + version（带 7 天断点缓存）----
+// ---- 快筛：dsh.bundle 声明 + version + 分层合规字段（带 7 天断点缓存，schema v2）----
+// 1.2.0：从 manifest 提取 L2 引擎兼容（dsh.engine vs HOST_ENGINE_VERSION，semver includePrerelease）
+// 与 L3 展示合规三件套（icon / exports ./locale/* / exports ./package.json）。缓存条目缺 v:2 视为过期重探。
+function manifestCompliance(m) {
+  const dsh = m && m.dsh ? m.dsh : null;
+  const engine = dsh && typeof dsh.engine === 'string' ? dsh.engine.trim() : '';
+  let engineCompat = null;
+  if (engine) {
+    try { engineCompat = satisfies(HOST_ENGINE_VERSION, engine, { includePrerelease: true }) ? 1 : 0; }
+    catch { engineCompat = null; } // 非法 range 不判不兼容，交给宿主安装时终审
+  }
+  let metaScore = 0;
+  const exp = (m && m.exports) || {};
+  const expKeys = Object.keys(exp);
+  if (m && m.icon) metaScore++;
+  if (expKeys.some((k) => k === './locale/*.json' || k.startsWith('./locale/'))) metaScore++;
+  if (exp['./package.json']) metaScore++;
+  return { installable: !!(dsh && dsh.bundle), version: (m && m.version) || '', engine, engineCompat, metaScore, ts: Date.now() };
+}
+
 async function loadProbeCache() {
   try {
     const c = JSON.parse(await readFile(PROBE_CACHE, 'utf8'));
@@ -318,7 +347,7 @@ async function probeManifest(item, cache) {
   if (item.full_name) keys.push('gh:' + item.full_name);
   for (const k of keys) {
     const hit = cache[k];
-    if (hit && Date.now() - hit.ts < PROBE_TTL_MS && hit.installable !== null) return { ...hit, from: k };
+    if (hit && hit.v === 2 && Date.now() - hit.ts < PROBE_TTL_MS && hit.installable !== null) return { ...hit, from: k };
   }
   // npm 通道：registry latest manifest 含全部自定义字段
   if (item.npm) {
@@ -326,7 +355,7 @@ async function probeManifest(item, cache) {
       const r = await fetch(`https://registry.npmmirror.com/${encodeURIComponent(item.npm)}/latest`, { signal: AbortSignal.timeout(10000) });
       if (r.ok) {
         const m = await r.json();
-        const res = { installable: !!(m.dsh && m.dsh.bundle), version: m.version || '', ts: Date.now() };
+        const res = { ...manifestCompliance(m), v: 2 };
         cache['npm:' + item.npm] = res;
         return { ...res, from: 'npm:' + item.npm };
       }
@@ -338,17 +367,17 @@ async function probeManifest(item, cache) {
       try {
         const r = await fetch(`https://raw.githubusercontent.com/${item.full_name}/HEAD/package.json`,
           { signal: AbortSignal.timeout(9000) });
-        if (r.status === 404) { const res = { installable: false, version: '', ts: Date.now() }; cache['gh:' + item.full_name] = res; return res; }
+        if (r.status === 404) { const res = { installable: false, version: '', engine: '', engineCompat: null, metaScore: 0, ts: Date.now(), v: 2 }; cache['gh:' + item.full_name] = res; return res; }
         if (r.ok) {
           const m = await r.json();
-          const res = { installable: !!(m.dsh && m.dsh.bundle), version: m.version || '', ts: Date.now() };
+          const res = { ...manifestCompliance(m), v: 2 };
           cache['gh:' + item.full_name] = res;
           return res;
         }
       } catch { await sleep(500); }
     }
   }
-  return { installable: null, version: item.version || '', ts: Date.now() };
+  return { installable: null, version: item.version || '', engine: '', engineCompat: null, metaScore: 0, ts: Date.now() };
 }
 
 async function probeAll(items) {
@@ -362,6 +391,9 @@ async function probeAll(items) {
       const res = await probeManifest(it, cache);
       it.installable = res.installable;
       if (res.version) it.version = res.version;
+      it.engine = res.engine || '';
+      it.engineCompat = typeof res.engineCompat === 'number' ? res.engineCompat : null;
+      it.metaScore = typeof res.metaScore === 'number' ? res.metaScore : 0;
       done++;
       if (res.installable === true) ok++; else if (res.installable === false) notOk++; else unknown++;
       if (done % 250 === 0) {
@@ -412,7 +444,10 @@ console.log(`合并后 ${items.length} 条（npm ${npmMap.size} / github ${ghMap
 if (!args.includes('--skip-probe')) await probeAll(items);
 
 sortItems(items);
-const out = { version: 2, builtAt: Date.now(), quality: true, total: items.length, items };
+const out = { version: 3, builtAt: Date.now(), quality: true, total: items.length, items };
 await writeFile(OUT, JSON.stringify(out));
 const inst = items.filter((x) => x.installable === true).length;
-console.log(`✅ ${OUT}：${items.length} 条（可装 ${inst}）builtAt ${new Date(out.builtAt).toISOString()}`);
+const compat = items.filter((x) => x.engineCompat === 1).length;
+const incompat = items.filter((x) => x.engineCompat === 0).length;
+const rich = items.filter((x) => x.metaScore >= 2).length;
+console.log(`✅ ${OUT}：${items.length} 条（可装 ${inst}）引擎兼容 ${compat} / 不兼容 ${incompat} / 未声明 ${items.length - compat - incompat}，展示合规 ≥2 分 ${rich} 条，builtAt ${new Date(out.builtAt).toISOString()}`);
