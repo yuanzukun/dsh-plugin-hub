@@ -28,6 +28,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
 
       - name: 构建插件目录 plugins.json（GitHub topic 主源 + npm keywords 补充）
         env:
