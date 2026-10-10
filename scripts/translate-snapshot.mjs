@@ -43,7 +43,7 @@ async function resolveTarget() {
   if (!agnes) {
     try { agnes = (await readFile(join(homedir(), '.workbuddy', 'agnes_api_key.txt'), 'utf8')).trim(); } catch { /* 无 Key */ }
   }
-  if (agnes) return { key: agnes, endpoint: 'https://api.agnes-ai.cn/v1', model: process.env.LLM_MODEL || 'agnes-2.0-flash' };
+  if (agnes) return { key: agnes, endpoint: 'https://api.agnes-ai.cn/v1', model: (process.env.LLM_MODEL && process.env.LLM_MODEL.startsWith('agnes-')) ? process.env.LLM_MODEL : 'agnes-2.5-flash' }; // workflow 全局 LLM_MODEL=deepseek-chat 不得泄漏到 Agnes 通道
   return null;
 }
 
