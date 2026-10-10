@@ -194,6 +194,32 @@ async function ghApi(url, attempt = 0) {
   return r.json();
 }
 
+/** pushed 日期二分找「中位切点」：f(x)=count(pushed:>=x) 单调递减，找 f(x)≈total/2 的 x。
+ *  bucket() 对两半递归（每层严格划分、计数严格变小）→ 任何总量 log 级收敛到每片 ≤1000。
+ *  ⚠️ 不能要求单切点两侧都 ≤1000：total>2000 时 f(x)∈[total-1000,1000] 为空集 —— 这正是
+ *  2026-10-10 审计发现的 0 星截断根因（旧固定候选 [7,30,90,180] 天同理必失败，0 星桶 8375 条只收到 3063）。
+ *  返回 null 仅当天粒度仍拆不开（单日堆积）或探测异常。 */
+async function findPushedSplit(b, total) {
+  const DAY = 864e5;
+  const base = Date.now() - 365 * DAY;
+  let lo = b.pmin ? Date.parse(b.pmin) : base; // f(lo) ≥ total/2（过老侧）
+  let hi = b.pmax ? Date.parse(b.pmax) : Date.now() + DAY; // f(hi) ≤ total/2（过新侧）
+  for (let i = 0; i < 14 && hi - lo > 36 * 3600 * 1000; i++) {
+    const mid = new Date((lo + hi) / 2).toISOString().slice(0, 10);
+    const d = await ghApi(searchUrl({ ...b, pmin: mid }, 1)); // 同星数约束随 b 保留
+    const n = d ? d.total_count : -1;
+    if (n < 0) return null;
+    if (n > total / 2) lo = Date.parse(mid);
+    else hi = Date.parse(mid);
+  }
+  // hi 处 f(hi) ≤ total/2 且 f(lo) > total/2：新侧 = f(hi)，老侧 = total − f(hi)。
+  // 两侧都必须非空（防同日堆积退化为 0/total 切分 → 子桶与父桶同量级递归空转）
+  const probe = await ghApi(searchUrl({ ...b, pmin: new Date(hi).toISOString().slice(0, 10) }, 1));
+  const fh = probe ? probe.total_count : -1;
+  if (fh > 0 && fh < total) return new Date(hi).toISOString().slice(0, 10);
+  return null;
+}
+
 async function harvestGithub() {
   const seen = new Map();
   const absorb = (list) => {
@@ -219,7 +245,7 @@ async function harvestGithub() {
       console.log(`  page ${p}/${pages} cum=${seen.size}`);
     }
     if (total <= 1000 || pages < 10) return;
-    if (depth >= 8) { console.log('  深度护栏'); return; }
+    if (depth >= 32) { console.log('  深度护栏'); return; } // 星链 + pushed 二分叠加，8 层不够（0 星二分独占 ~9 层）
     await sleep(PAGE_MS);
     const last = await ghApi(searchUrl(b, 10));
     const items10 = last ? last.items || [] : [];
@@ -230,18 +256,10 @@ async function harvestGithub() {
       await sleep(PAGE_MS);
       await bucket({ ...b, smin: s }, depth + 1);
     } else {
-      // 同星数大量堆积（如 1300 个 4★）→ 按 pushed 日期拆：从近到远试候选切点，
-      // 探测取两侧都 ≤1000 的切点（避免固定中点在「全部最近更新」的数据上拆不开而空转）。
-      const cands = [7, 30, 90, 180].map((d) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10));
-      let split = null;
-      for (const mid of cands) {
-        const dA = await ghApi(searchUrl({ ...b, pmax: mid }, 1));
-        const tA = dA ? dA.total_count : -1; // 早于 mid 的条数（老侧）
-        if (tA <= 0) continue;
-        if (tA <= 1000 && total - tA <= 1000) { split = mid; break }
-      }
-      if (!split) { console.log('  pushed 拆分失败（切点探测均不满足），保留已抓部分'); return }
-      console.log(`  pushed 拆分 @${split}`);
+      // 同星数大量堆积（0 星桶实测 8375 条）→ pushed 日期二分（动态中点收敛，见 findPushedSplit）
+      const split = await findPushedSplit(b, total);
+      if (!split) { console.log('  pushed 二分失败（单日堆积超限或探测异常），保留已抓部分'); return }
+      console.log(`  pushed 二分 @${split}`);
       await bucket({ ...b, pmax: split }, depth + 1);
       await sleep(PAGE_MS);
       await bucket({ ...b, pmin: split }, depth + 1);
