@@ -188,17 +188,21 @@ async function main() {
 
   // ---- 回写快照 + 缓存 ----
   let applied = 0;
+  let changed = 0;
   for (const it of snap.items) {
     const d = typeof it.description === 'string' ? it.description.trim() : '';
     if (!d || hasCJK(d)) continue;
     const zh = tx[sha1(d)];
-    if (zh) { it.description_zh = zh; applied++; }
+    if (zh) { if (it.description_zh !== zh) changed++; it.description_zh = zh; applied++; }
   }
+  // 2026-10-10：内容变更必须推进 builtAt —— 客户端 trySnap/缓存只认 builtAt 对比，
+  // 不改会导致「翻译完了客户端永远拉不到新版」（本轮英文残留的闭环根因）。
+  if (changed > 0 && !DRY) snap.builtAt = Date.now();
   if (!DRY) {
     await writeFile(SNAP, JSON.stringify(snap));
     await writeFile(TX_CACHE, JSON.stringify({ v: CACHE_VERSION, tx }));
   }
-  console.log(`✅ translate: 回写 description_zh ${applied} 条（翻译成功 ${ok} / 失败 ${fail}，缓存累计 ${Object.keys(tx).length}），快照 ${(JSON.stringify(snap).length / 1048576).toFixed(2)}MB`);
+  console.log(`✅ translate: 回写 description_zh ${applied} 条（本次变更 ${changed}，翻译成功 ${ok} / 失败 ${fail}，缓存累计 ${Object.keys(tx).length}），快照 ${(JSON.stringify(snap).length / 1048576).toFixed(2)}MB${changed > 0 && !DRY ? '，builtAt 已推进' : ''}`);
   if (fail > 0 && ok === 0) console.warn('translate: 全部批次失败 —— 检查 LLM_API_KEY / 额度（快照已保留无 zh 原样，客户端运行时翻译兜底）');
 }
 
