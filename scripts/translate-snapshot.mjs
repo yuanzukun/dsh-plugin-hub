@@ -51,6 +51,24 @@ const BATCH = Math.max(1, Number(process.env.TX_BATCH) || 25);
 const CONC = Math.max(1, Number(process.env.TX_CONC) || 3);
 const MAX_TOKENS = Math.max(1000, Number(process.env.TX_MAX_TOKENS) || 4000);
 
+// 0.9.17：占位描述判定（与客户端 lib/client.js isPlaceholderDesc 保持同构）——
+// 非自然语言（包名变体/topic token 清单）LLM 无法有效翻译，跳过收集避免白烧配额、避免译文校验静默丢弃
+function isPlaceholderDesc(d, name) {
+  if (!d || /[\u4e00-\u9fff]/.test(d)) return false;
+  const t = String(d).trim();
+  if (t === name || t === String(name || '').replace(/^dsh-/, '')) return true;
+  if (/^dsh(-[\w-]+)*[.\s]*$/.test(t)) return true;
+  const tokens = t.split(/[,;/|]+|\s+/);
+  let tokenish = 0;
+  for (const raw0 of tokens) {
+    const tk = raw0.replace(/^[.\s]+|[.\s]+$/g, '');
+    if (!tk) continue;
+    if (/^[a-z0-9]+([.\-_][a-z0-9]+)*$/.test(tk)) tokenish++;
+    else return false;
+  }
+  return tokenish >= 2;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sha1 = (s) => createHash('sha1').update(s, 'utf8').digest('hex');
 const hasCJK = (s) => /[\u4e00-\u9fff]/.test(s);
@@ -70,16 +88,17 @@ async function main() {
 
   // ---- 收集待翻译（唯一描述哈希）----
   const need = new Map(); // hash -> desc（跨条目共享）
-  let alreadyZh = 0, empty = 0, cached = 0;
+  let alreadyZh = 0, empty = 0, cached = 0, placeholder = 0;
   for (const it of snap.items) {
     const d = typeof it.description === 'string' ? it.description.trim() : '';
     if (!d) { empty++; continue; }
     if (hasCJK(d)) { alreadyZh++; continue; } // 原文即中文，客户端原样显示
+    if (isPlaceholderDesc(d, it.name)) { placeholder++; continue; } // 0.9.17：非自然语言占位，不译不回写
     const h = sha1(d);
     if (tx[h]) { cached++; it.description_zh = tx[h]; continue; }
     if (!need.has(h)) need.set(h, d);
   }
-  console.log(`translate: 条目 ${snap.items.length}（原文中文 ${alreadyZh} / 空 ${empty} / 缓存命中 ${cached} / 待翻译唯一描述 ${need.size}）`);
+  console.log(`translate: 条目 ${snap.items.length}（原文中文 ${alreadyZh} / 空 ${empty} / 缓存命中 ${cached} / 占位跳过 ${placeholder} / 待翻译唯一描述 ${need.size}）`);
   if (DRY) { console.log('translate: --dry-run，结束'); return; }
   if (!need.size) { console.log('translate: 无待翻译项'); return; }
 
@@ -141,6 +160,7 @@ async function main() {
     for (const h of batch) {
       const v = typeof parsed[h] === 'string' ? parsed[h].trim() : '';
       if (v && v.length <= TX_MAX && hasCJK(v) && v !== need.get(h)) out[h] = v; // 校验：含 CJK、非原文复述
+      else out[h] = need.get(h); // 0.9.17：LLM 判定无可译内容（产品名/单词）→ 标记性回写原文，客户端显示原文且不计入未翻译
     }
     return out;
   }

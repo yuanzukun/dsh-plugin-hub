@@ -17,6 +17,9 @@
 //   归并校验（1.1.0）：npm 条目仅当 repository 指向「源 B 收割到的 topic 仓库」才合并富化
 //   （stars/topics/updated_at，source=both）；指向宿主本体仓（HOST_REPOS）的一律视为无仓库
 //   （不借官方主仓星数冒充出品）。source=npm 的条目 = 不在官方 topic 页，由客户端默认视图隐藏。
+//   1.3.0 市场口径（用户决策 2026-10-11）：快照只收录「官方 topic:dsh-plugin 内、通过官方硬门禁」的仓库
+//   —— 产出前剔除 npm 独立条目（source=npm）、未声明 dsh.bundle（installable=false）、
+//   探测失败（null，下轮重建补回）与引擎不兼容（engineCompat=0）。快照 = 市场内容，口径在数据源侧收口。
 //
 // 产出 public/cards-snapshot.json：
 //   { version:3, builtAt, quality:true, total,
@@ -164,6 +167,7 @@ async function fetchSeeds() {
 }
 
 // ---- 源 B：GitHub topic:dsh-plugin 分桶收割 ----
+const CREATED_BASE = '2015-01-01'; // created 二分的宇宙下界（DSH 生态不存在更早仓库，f(下界)=桶全量）
 function searchUrl(bucket, page) {
   const pushedAfter = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const lo = bucket.smin ?? 0; // 1.1.0：★>=0 = 不限星数（lo 为 0 时不发 stars 限定符）
@@ -178,6 +182,10 @@ function searchUrl(bucket, page) {
   if (pmin && pmax) q += ` pushed:${pmin}..${pmax}`;
   else if (pmin) q += ` pushed:>=${pmin}`;
   else if (pmax) q += ` pushed:<${pmax}`;
+  // created 区间（0.9.18-hub）：pushed 天粒度不可拆时的替代切分维度（与 pushed 属不同限定符类型，可共存取交集）
+  if (bucket.cmin && bucket.cmax) q += ` created:${bucket.cmin}..${bucket.cmax}`;
+  else if (bucket.cmin) q += ` created:>=${bucket.cmin}`;
+  else if (bucket.cmax) q += ` created:<${bucket.cmax}`;
   q += ' dsh in:name,description,topics';
   return `https://api.github.com/search/repositories?q=${encodeURIComponent(q)}&sort=stars&order=desc&per_page=100&page=${page}`;
 }
@@ -194,19 +202,30 @@ async function ghApi(url, attempt = 0) {
   return r.json();
 }
 
-/** pushed 日期二分找「中位切点」：f(x)=count(pushed:>=x) 单调递减，找 f(x)≈total/2 的 x。
- *  bucket() 对两半递归（每层严格划分、计数严格变小）→ 任何总量 log 级收敛到每片 ≤1000。
+/** 通用日期维度二分找「中位切点」（0.9.18-hub：由 findPushedSplit 泛化，支持 pushed/created 两维度）：
+ *  f(x)=count(field:>=x) 单调递减，找 f(x)≈total/2 的 x。bucket() 对两半递归（每层严格划分、
+ *  计数严格变小）→ 任何总量 log 级收敛到每片 ≤1000。
  *  ⚠️ 不能要求单切点两侧都 ≤1000：total>2000 时 f(x)∈[total-1000,1000] 为空集 —— 这正是
  *  2026-10-10 审计发现的 0 星截断根因（旧固定候选 [7,30,90,180] 天同理必失败，0 星桶 8375 条只收到 3063）。
+ *  ⚠️ pushed 有第二类失败（2026-10-10 深夜实测）：0★/1★ 新仓潮 1.2 万条 pushed 全压在最近 1-2 天
+ *  → f(x) 只会等于 total（窗内）或 0（窗外），天粒度无切点 → f(hi)=0 → 必然返回 null。
+ *  此时应降级 created 维度（新仓 created 分散在 8-10 月，可拆）。
  *  返回 null 仅当天粒度仍拆不开（单日堆积）或探测异常。 */
-async function findPushedSplit(b, total) {
+async function findDateSplit(b, total, field) {
   const DAY = 864e5;
-  const base = Date.now() - 365 * DAY;
-  let lo = b.pmin ? Date.parse(b.pmin) : base; // f(lo) ≥ total/2（过老侧）
-  let hi = b.pmax ? Date.parse(b.pmax) : Date.now() + DAY; // f(hi) ≤ total/2（过新侧）
+  const pre = field === 'pushed' ? 'p' : 'c'; // 桶键前缀：pushed→pmin/pmax，created→cmin/cmax
+  let lo, hi; // 不变量：f(lo) ≥ total/2（过老侧），f(hi) ≤ total/2（过新侧）
+  if (field === 'pushed') {
+    lo = b.pmin ? Date.parse(b.pmin) : Date.now() - 365 * DAY;
+    hi = b.pmax ? Date.parse(b.pmax) : Date.now() + DAY;
+  } else {
+    lo = b.cmin ? Date.parse(b.cmin) : Date.parse(CREATED_BASE);
+    hi = b.cmax ? Date.parse(b.cmax) : Date.now() + DAY;
+  }
   for (let i = 0; i < 14 && hi - lo > 36 * 3600 * 1000; i++) {
+    await sleep(PAGE_MS); // 二分探测与翻页同限额，逐发节流（此前背靠背易触发 403）
     const mid = new Date((lo + hi) / 2).toISOString().slice(0, 10);
-    const d = await ghApi(searchUrl({ ...b, pmin: mid }, 1)); // 同星数约束随 b 保留
+    const d = await ghApi(searchUrl({ ...b, [pre + 'min']: mid }, 1)); // 同星数/另一日期约束随 b 保留
     const n = d ? d.total_count : -1;
     if (n < 0) return null;
     if (n > total / 2) lo = Date.parse(mid);
@@ -214,7 +233,8 @@ async function findPushedSplit(b, total) {
   }
   // hi 处 f(hi) ≤ total/2 且 f(lo) > total/2：新侧 = f(hi)，老侧 = total − f(hi)。
   // 两侧都必须非空（防同日堆积退化为 0/total 切分 → 子桶与父桶同量级递归空转）
-  const probe = await ghApi(searchUrl({ ...b, pmin: new Date(hi).toISOString().slice(0, 10) }, 1));
+  await sleep(PAGE_MS);
+  const probe = await ghApi(searchUrl({ ...b, [pre + 'min']: new Date(hi).toISOString().slice(0, 10) }, 1));
   const fh = probe ? probe.total_count : -1;
   if (fh > 0 && fh < total) return new Date(hi).toISOString().slice(0, 10);
   return null;
@@ -245,7 +265,7 @@ async function harvestGithub() {
       console.log(`  page ${p}/${pages} cum=${seen.size}`);
     }
     if (total <= 1000 || pages < 10) return;
-    if (depth >= 32) { console.log('  深度护栏'); return; } // 星链 + pushed 二分叠加，8 层不够（0 星二分独占 ~9 层）
+    if (depth >= 32) { console.log('  深度护栏'); return; } // 星链 + 日期二分叠加，8 层不够（0 星二分独占 ~9 层）
     await sleep(PAGE_MS);
     const last = await ghApi(searchUrl(b, 10));
     const items10 = last ? last.items || [] : [];
@@ -256,13 +276,29 @@ async function harvestGithub() {
       await sleep(PAGE_MS);
       await bucket({ ...b, smin: s }, depth + 1);
     } else {
-      // 同星数大量堆积（0 星桶实测 8375 条）→ pushed 日期二分（动态中点收敛，见 findPushedSplit）
-      const split = await findPushedSplit(b, total);
-      if (!split) { console.log('  pushed 二分失败（单日堆积超限或探测异常），保留已抓部分'); return }
-      console.log(`  pushed 二分 @${split}`);
-      await bucket({ ...b, pmax: split }, depth + 1);
+      // 同星数大量堆积（0 星桶实测 8375+ 条）→ 日期维度二分。
+      // 0.9.18-hub：先探测 pushed 是否退化（0★/1★ 新仓潮实测 f(≥now-2d)=total → 天粒度无切点，
+      // 白烧 ~14 发探测），退化直接走 created；未退化则 pushed 优先、created 兜底。
+      let dim = null, split = null;
       await sleep(PAGE_MS);
-      await bucket({ ...b, pmin: split }, depth + 1);
+      const tailProbe = await ghApi(searchUrl({ ...b, pmin: new Date(Date.now() - 2 * 864e5).toISOString().slice(0, 10) }, 1));
+      const tailN = tailProbe ? tailProbe.total_count : -1;
+      if (tailN >= total) {
+        dim = 'created';
+        split = await findDateSplit(b, total, 'created');
+      } else {
+        split = await findDateSplit(b, total, 'pushed');
+        if (split) dim = 'pushed';
+        else {
+          dim = 'created';
+          split = await findDateSplit(b, total, 'created');
+        }
+      }
+      if (!split) { console.log('  pushed/created 二分均失败（天粒度堆积超限或探测异常），保留已抓部分'); return }
+      console.log(`  ${dim} 二分 @${split}`);
+      await bucket({ ...b, [dim === 'pushed' ? 'pmax' : 'cmax']: split }, depth + 1);
+      await sleep(PAGE_MS);
+      await bucket({ ...b, [dim === 'pushed' ? 'pmin' : 'cmin']: split }, depth + 1);
     }
   }
   await bucket({}, 0);
@@ -463,13 +499,38 @@ if (!args.includes('--github-only')) {
 
 const items = [...merge(npmMap, ghMap).values()];
 console.log(`合并后 ${items.length} 条（npm ${npmMap.size} / github ${ghMap.size}）`);
-if (!args.includes('--skip-probe')) await probeAll(items);
+const skipProbe = args.includes('--skip-probe');
+if (!skipProbe) await probeAll(items);
 
-sortItems(items);
-const out = { version: 3, builtAt: Date.now(), quality: true, total: items.length, items };
+// 1.3.0 市场口径（用户决策 2026-10-11）：快照只收录「官方 topic:dsh-plugin 内、通过官方硬门禁」的仓库。
+//   剔除 source=npm（不在 topic 页的 npm 独立包；npm 源已通过 merge 为 topic 仓库富化版本/可装信息）、
+//   installable=false（未声明 dsh.bundle，宿主拒装）、engineCompat=0（引擎不兼容，装上即坏）。
+//   installable=null（探测失败）同样剔除，交下一轮每日重建自然补回。
+//   --skip-probe（快速刷新）时无快筛数据，只剔 npm 侧、不做可装过滤（产物仅供调试，不发布）。
+const nNpmOnly = items.filter((x) => x.source === 'npm').length;
+const nNotInst = items.filter((x) => x.source !== 'npm' && x.installable === false).length;
+const nUnknown = items.filter((x) => x.source !== 'npm' && x.installable == null).length;
+const nIncompat = items.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat === 0).length;
+const scope = skipProbe
+  ? items.filter((x) => x.source !== 'npm')
+  : items.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat !== 0);
+console.log(`市场口径过滤：${items.length} → ${scope.length}（npm 独立 ${nNpmOnly}，未声明 bundle ${nNotInst}，探测失败 ${nUnknown}，引擎不兼容 ${nIncompat}${skipProbe ? '，skip-probe 未做可装过滤' : ''}）`);
+
+// 1.3.1 npm 侧哨兵（方案 C 第 2 层，2026-10-11）：发现「声明了 dsh.bundle 但不在官方 topic 页」的包，仅记录不收录。
+//   出路：① 作者补打 topic:dsh-plugin → 下轮自动收录（口径自愈）；② 确认值得收录的走种子白名单（第 3 层，待定）。
+const sentinels = items.filter((x) => x.source === 'npm' && x.installable === true);
+if (sentinels.length) {
+  console.log(`🔍 npm 哨兵：${sentinels.length} 个包声明了 dsh.bundle 但不在官方 topic 页（仅记录，未收录）：`);
+  for (const s of sentinels.slice(0, 30)) console.log(`   - ${s.npm}${s.version ? ' v' + s.version : ''} ${String(s.description || '').slice(0, 60)}`);
+  if (sentinels.length > 30) console.log(`   … 其余 ${sentinels.length - 30} 个略`);
+} else {
+  console.log('🔍 npm 哨兵：无盲区（声明 dsh.bundle 的 npm 包均已在官方 topic 页）');
+}
+
+sortItems(scope);
+const out = { version: 3, builtAt: Date.now(), quality: true, total: scope.length, items: scope };
 await writeFile(OUT, JSON.stringify(out));
-const inst = items.filter((x) => x.installable === true).length;
-const compat = items.filter((x) => x.engineCompat === 1).length;
-const incompat = items.filter((x) => x.engineCompat === 0).length;
-const rich = items.filter((x) => x.metaScore >= 2).length;
-console.log(`✅ ${OUT}：${items.length} 条（可装 ${inst}）引擎兼容 ${compat} / 不兼容 ${incompat} / 未声明 ${items.length - compat - incompat}，展示合规 ≥2 分 ${rich} 条，builtAt ${new Date(out.builtAt).toISOString()}`);
+const compat = scope.filter((x) => x.engineCompat === 1).length;
+const undeclared = scope.filter((x) => x.engineCompat !== 1 && x.engineCompat !== 0).length;
+const rich = scope.filter((x) => x.metaScore >= 2).length;
+console.log(`✅ ${OUT}：${scope.length} 条（全部声明 dsh.bundle）引擎兼容 ${compat} / 未声明 engine ${undeclared}，展示合规 ≥2 分 ${rich} 条，builtAt ${new Date(out.builtAt).toISOString()}`);
