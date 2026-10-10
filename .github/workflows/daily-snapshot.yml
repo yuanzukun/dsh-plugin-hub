@@ -10,6 +10,9 @@ on:
     - cron: '30 18 * * *' # UTC 18:30 = 北京时间每日 02:30
     - cron: '30 6 * * *'  # UTC 06:30 = 北京时间每日 14:30（0.8.7 R1 提频：构建间隔 24h → 12h）
   workflow_dispatch: {} # 支持手动触发
+  push:
+    branches: [master]
+    paths: ['scripts/**', 'fetch.mjs', '.github/workflows/daily-snapshot.yml'] # 路径过滤：CI 自身提交的 data/* 与 public/* 不会自触发（防死循环）；gh 凭证失效期间以此代替手动点火
 
 permissions:
   contents: write
