@@ -24,7 +24,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90 # 首次全量翻译约 +15-20 分钟（缓存就绪后每日增量近零）
+    timeout-minutes: 180 # 2026-10-11：90 → 180。90 上限连续取消两次运行（#33/#34）；#32 长尾重建期翻译增量 ~5-6k 条，90 分钟贴线风险高
     steps:
       - uses: actions/checkout@v4
 
