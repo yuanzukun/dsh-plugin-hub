@@ -21,6 +21,17 @@
 //   —— 产出前剔除 npm 独立条目（source=npm）、未声明 dsh.bundle（installable=false）、
 //   探测失败（null，下轮重建补回）与引擎不兼容（engineCompat=0）。快照 = 市场内容，口径在数据源侧收口。
 //
+//   1.4.0 增量构建（2026-10-11，治理 CI 超时 #33/#34 与 0★ 新仓潮收割成本）：
+//     - 模式判定：--full / --incremental 显式指定；缺省自动 —— 周日(UTC)、无状态文件、
+//       状态超 6 天、缺上次快照 → 全量，否则增量。
+//     - 增量收割窗口 = 上次成功构建时刻 − 12h 重叠（防边界漏仓）；基线 = 上次快照的仓库条目，
+//       本轮收割结果覆盖同名仓库（npm 关联由 npm 源每轮全量重导出，不依赖基线新鲜度）。
+//     - 探测缓存回种：上次快照自带的 installable/engine/engineCompat/metaScore 回种 probe-cache
+//       （ts=快照 builtAt，7 天 TTL 内等效命中）→ 每日冷探只剩真正新增的仓库。
+//     - 增量模式 npm 独立包不做冷探（新包 installable=null → 市场口径自然排除；哨兵完整审计以全量为准）。
+//     - 护栏：收割结果为 0 → exit 1（不发布空快照、不推进增量窗口）；--skip-probe 不推进窗口。
+//     - 状态文件 data/harvest-state.json { version, lastHarvestAt, lastFullAt }，随 data/ 提交。
+//
 // 产出 public/cards-snapshot.json：
 //   { version:3, builtAt, quality:true, total,
 //     items:[{ full_name, npm, name, version, installable, source, stargazers_count, updated_at, description, topics,
@@ -28,10 +39,12 @@
 //   installable: true（声明 dsh.bundle）/ false（未声明）/ null（探测失败，客户端按未校验显示）
 //
 // 用法：
-//   node scripts/fetch-cards-snapshot.mjs                # 全量构建（双源 + 快筛，约 12 分钟）
+//   node scripts/fetch-cards-snapshot.mjs                # 自动模式（周日/无状态/状态过期 → 全量，否则增量）
+//   node scripts/fetch-cards-snapshot.mjs --full         # 强制全量构建
+//   node scripts/fetch-cards-snapshot.mjs --incremental  # 强制增量（基线 = 上次快照）
 //   GITHUB_TOKEN=xxx node …                              # 提 GitHub 限额
-//   node scripts/fetch-cards-snapshot.mjs --skip-probe   # 跳过快筛（快速刷新列表）
-//   node scripts/fetch-cards-snapshot.mjs --from-json d.json  # 从 GitHub 源 dump 离线重建（跳过在线收割）
+//   node scripts/fetch-cards-snapshot.mjs --skip-probe   # 跳过快筛（快速刷新列表，不推进增量窗口）
+//   node scripts/fetch-cards-snapshot.mjs --from-json d.json  # 从 GitHub 源 dump 离线重建（跳过在线收割，不推进窗口）
 //
 // ⚠️ GitHub Search API 硬约束（实测）：单查询最多前 1000 条（第 11 页起 422）→ 分桶；
 //    同类型限定符后者覆盖前者 → 星数/时间必须合并单区间。
@@ -46,6 +59,9 @@ const ROOT = dirname(fileURLToPath(import.meta.url)) + '/..';
 const OUT = join(ROOT, 'public', 'cards-snapshot.json');
 const PROBE_CACHE = join(ROOT, 'data', 'probe-cache.json');
 const PROBE_TTL_MS = 7 * 24 * 3600 * 1000;
+const STATE_FILE = join(ROOT, 'data', 'harvest-state.json');
+// 1.4.0 增量模式收割窗口起点（ISO 日期）；null = 默认近 12 个月全量窗口
+let BASE_PUSHED_AFTER = null;
 // 1.2.0 引擎兼容判定的宿主基准版本（与 DSH Desktop 运行时 desktopVersion 对齐，发版时同步更新）
 const HOST_ENGINE_VERSION = '0.2.0-rc.2';
 
@@ -169,7 +185,8 @@ async function fetchSeeds() {
 // ---- 源 B：GitHub topic:dsh-plugin 分桶收割 ----
 const CREATED_BASE = '2015-01-01'; // created 二分的宇宙下界（DSH 生态不存在更早仓库，f(下界)=桶全量）
 function searchUrl(bucket, page) {
-  const pushedAfter = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  // 1.4.0：增量模式下 BASE_PUSHED_AFTER = 上次构建时刻−12h；null 时保持全量口径（近 12 个月）
+  const pushedAfter = BASE_PUSHED_AFTER || new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const lo = bucket.smin ?? 0; // 1.1.0：★>=0 = 不限星数（lo 为 0 时不发 stars 限定符）
   const hi = bucket.smax ?? null;
   let q = 'topic:dsh-plugin';
@@ -236,7 +253,16 @@ async function findDateSplit(b, total, field) {
   await sleep(PAGE_MS);
   const probe = await ghApi(searchUrl({ ...b, [pre + 'min']: new Date(hi).toISOString().slice(0, 10) }, 1));
   const fh = probe ? probe.total_count : -1;
-  if (fh > 0 && fh < total) return new Date(hi).toISOString().slice(0, 10);
+  if (fh > 0 && fh < total) {
+    // 2026-10-11 修正（实测 0★ 尾桶 depth 9→17 空转）：还必须保证切点严格收窄本桶边界，
+    // 否则 max 侧子桶与父桶完全相同（中位点 == 现有 pmax/cmax）→ 递归不收敛烧到深度护栏。
+    // 不收窄时返回 null，让调用方换维度（created）或优雅放弃（保留已抓部分）。
+    const curMax = b[pre + 'max'] ? Date.parse(b[pre + 'max']) : null;
+    const curMin = b[pre + 'min'] ? Date.parse(b[pre + 'min']) : null;
+    if (curMax !== null && hi >= curMax) return null;
+    if (curMin !== null && hi <= curMin) return null;
+    return new Date(hi).toISOString().slice(0, 10);
+  }
   return null;
 }
 
@@ -399,13 +425,18 @@ async function saveProbeCache(c) {
   await writeFile(PROBE_CACHE, JSON.stringify(c)).catch(() => {});
 }
 
-async function probeManifest(item, cache) {
+async function probeManifest(item, cache, opts = {}) {
+  const noColdNpm = !!opts.noColdNpm;
   const keys = [];
   if (item.npm) keys.push('npm:' + item.npm);
   if (item.full_name) keys.push('gh:' + item.full_name);
   for (const k of keys) {
     const hit = cache[k];
     if (hit && hit.v === 2 && Date.now() - hit.ts < PROBE_TTL_MS && hit.installable !== null) return { ...hit, from: k };
+  }
+  // 1.4.0 增量模式：npm 独立包不做冷探（新包留 null → 市场口径自然排除；哨兵完整审计以全量为准）
+  if (noColdNpm && !item.full_name) {
+    return { installable: null, version: item.version || '', engine: '', engineCompat: null, metaScore: 0, ts: Date.now(), coldSkipped: true };
   }
   // npm 通道：registry latest manifest 含全部自定义字段
   if (item.npm) {
@@ -438,15 +469,45 @@ async function probeManifest(item, cache) {
   return { installable: null, version: item.version || '', engine: '', engineCompat: null, metaScore: 0, ts: Date.now() };
 }
 
-async function probeAll(items) {
-  const cache = await loadProbeCache();
-  let done = 0, ok = 0, notOk = 0, unknown = 0;
-  const queue = items.slice();
+// 1.4.0：上次快照自带探测结论 → 回种缓存（ts=快照 builtAt，7 天 TTL 内等效命中，免冷探）
+// 探测失败（installable=null）的条目不回种，保留下轮重探机会。
+function seedProbeCacheFromSnapshot(prev, cache) {
+  const ts = prev.builtAt || Date.now();
+  let seeded = 0;
+  for (const it of prev.items || []) {
+    if (it.installable == null) continue;
+    const val = {
+      v: 2,
+      installable: it.installable === true,
+      version: it.version || '',
+      engine: it.engine || '',
+      engineCompat: typeof it.engineCompat === 'number' ? it.engineCompat : null,
+      metaScore: typeof it.metaScore === 'number' ? it.metaScore : 0,
+      ts,
+    };
+    for (const k of [it.npm ? 'npm:' + it.npm : '', it.full_name ? 'gh:' + it.full_name : '']) {
+      if (!k) continue;
+      const hit = cache[k];
+      if (hit && hit.v === 2 && Date.now() - hit.ts < PROBE_TTL_MS && hit.installable !== null) continue;
+      cache[k] = val;
+      seeded++;
+    }
+  }
+  return seeded;
+}
+
+async function probeAll(items, cacheIn = null, opts = {}) {
+  const cache = cacheIn || (await loadProbeCache());
+  const noColdNpm = !!opts.noColdNpm;
+  let done = 0, ok = 0, notOk = 0, unknown = 0, coldSkip = 0;
+  // 1.4.0：topic 仓库（source!=='npm'）优先探测——市场口径只认这批；npm 独立包排后
+  const queue = items.filter((x) => x.source !== 'npm').concat(items.filter((x) => x.source === 'npm'));
   async function worker() {
     for (;;) {
       const it = queue.shift();
       if (!it) return;
-      const res = await probeManifest(it, cache);
+      const res = await probeManifest(it, cache, { noColdNpm });
+      if (res.coldSkipped) coldSkip++;
       it.installable = res.installable;
       if (res.version) it.version = res.version;
       it.engine = res.engine || '';
@@ -462,12 +523,37 @@ async function probeAll(items) {
   }
   await Promise.all(Array.from({ length: PROBE_CONC }, worker));
   await saveProbeCache(cache);
-  console.log(`快筛完成：可装=${ok} 不可装=${notOk} 未定=${unknown}`);
+  console.log(
+    `快筛完成：可装=${ok} 不可装=${notOk} 未定=${unknown}` +
+      (coldSkip ? `（增量模式冷探跳过 npm 独立包 ${coldSkip} 个）` : '')
+  );
 }
 
 // ---- main ----
 const args = process.argv.slice(2);
 const fromIdx = args.indexOf('--from-json');
+const skipProbe = args.includes('--skip-probe');
+const BUILD_START = Date.now();
+
+async function loadJsonSafe(p) {
+  try { return JSON.parse(await readFile(p, 'utf8')); } catch { return null; }
+}
+
+// 1.4.0 构建模式判定：--full/--incremental 显式；自动 = 周日(UTC) 或 无状态 或 状态>6天 或 缺上次快照 → 全量
+let state = await loadJsonSafe(STATE_FILE);
+const prevSnapshot = await loadJsonSafe(OUT);
+const stateFresh = !!(state && state.lastHarvestAt && BUILD_START - state.lastHarvestAt < 6 * 864e5);
+let MODE = args.includes('--full')
+  ? 'full'
+  : args.includes('--incremental')
+    ? 'incremental'
+    : new Date().getUTCDay() === 0 || !stateFresh || !prevSnapshot
+      ? 'full'
+      : 'incremental';
+console.log(
+  `[mode] 构建模式: ${MODE}（周日(UTC)/无状态/状态>6天/缺上次快照 → 全量；--full/--incremental 可显式指定）`
+);
+
 let npmMap = new Map();
 let ghMap;
 if (fromIdx > -1) {
@@ -482,7 +568,39 @@ if (fromIdx > -1) {
     });
   }
 } else {
+  if (MODE === 'incremental') {
+    if (!state?.lastHarvestAt) {
+      // 护栏：显式 --incremental 但缺状态文件（首次构建/状态丢失）→ 回退全量，与自动模式口径一致
+      console.warn('[mode] 增量模式需要状态文件 data/harvest-state.json（含 lastHarvestAt），当前缺失 → 回退全量窗口');
+      MODE = 'full';
+    } else {
+      BASE_PUSHED_AFTER = new Date(state.lastHarvestAt - 12 * 3600 * 1000).toISOString().slice(0, 10);
+      console.log(`[mode] 增量收割窗口: pushed:>=${BASE_PUSHED_AFTER}（含 12h 重叠防边界漏仓）`);
+    }
+  }
   ghMap = await harvestGithub();
+  // 1.4.0 护栏：收割全空 = GitHub API 故障/限流 → 中止。防两起事故：
+  //   ① 全量模式下发布「只剩 npm 源」的空市场快照；② 增量模式下推进窗口造成永久漏仓。
+  if (ghMap.size === 0) {
+    console.error('收割结果为 0（GitHub API 故障或限流），中止构建：不发布、不推进增量窗口');
+    process.exit(1);
+  }
+  if (MODE === 'incremental') {
+    // 基线 = 上次快照的仓库条目（stars ≤1 天陈旧可接受）；本轮新收割覆盖同名仓库。
+    // npm 关联不依赖基线：npm 源每轮全量抓取，merge 时按 repository 重导出。
+    const base = new Map();
+    for (const it of prevSnapshot.items || []) {
+      if (!it.full_name || HOST_REPOS.has(it.full_name.toLowerCase())) continue;
+      base.set(it.full_name, { ...it, npm: it.npm || '', source: it.source === 'both' ? 'both' : 'github' });
+    }
+    let overlap = 0;
+    for (const [fn, it] of ghMap) {
+      if (base.has(fn)) overlap++;
+      base.set(fn, it);
+    }
+    console.log(`[mode] 增量合并: 基线 ${base.size} 仓（本轮重收 ${overlap}，新增 ${ghMap.size - overlap}）`);
+    ghMap = base;
+  }
 }
 if (!args.includes('--github-only')) {
   npmMap = await fetchNpm();
@@ -499,8 +617,15 @@ if (!args.includes('--github-only')) {
 
 const items = [...merge(npmMap, ghMap).values()];
 console.log(`合并后 ${items.length} 条（npm ${npmMap.size} / github ${ghMap.size}）`);
-const skipProbe = args.includes('--skip-probe');
-if (!skipProbe) await probeAll(items);
+
+// 1.4.0：先回种上次快照的探测结论进缓存，再快筛 → 每日冷探只剩真正新增的条目
+const probeCache = await loadProbeCache();
+if (prevSnapshot && Array.isArray(prevSnapshot.items) && prevSnapshot.items.length) {
+  const n = seedProbeCacheFromSnapshot(prevSnapshot, probeCache);
+  console.log(`[probe] 从上次快照回种探测缓存: ${n} 条（7 天 TTL 内免冷探）`);
+}
+if (!skipProbe) await probeAll(items, probeCache, { noColdNpm: MODE === 'incremental' });
+else await saveProbeCache(probeCache);
 
 // 1.3.0 市场口径（用户决策 2026-10-11）：快照只收录「官方 topic:dsh-plugin 内、通过官方硬门禁」的仓库。
 //   剔除 source=npm（不在 topic 页的 npm 独立包；npm 源已通过 merge 为 topic 仓库富化版本/可装信息）、
@@ -519,17 +644,32 @@ console.log(`市场口径过滤：${items.length} → ${scope.length}（npm 独�
 // 1.3.1 npm 侧哨兵（方案 C 第 2 层，2026-10-11）：发现「声明了 dsh.bundle 但不在官方 topic 页」的包，仅记录不收录。
 //   出路：① 作者补打 topic:dsh-plugin → 下轮自动收录（口径自愈）；② 确认值得收录的走种子白名单（第 3 层，待定）。
 const sentinels = items.filter((x) => x.source === 'npm' && x.installable === true);
-if (sentinels.length) {
-  console.log(`🔍 npm 哨兵：${sentinels.length} 个包声明了 dsh.bundle 但不在官方 topic 页（仅记录，未收录）：`);
-  for (const s of sentinels.slice(0, 30)) console.log(`   - ${s.npm}${s.version ? ' v' + s.version : ''} ${String(s.description || '').slice(0, 60)}`);
-  if (sentinels.length > 30) console.log(`   … 其余 ${sentinels.length - 30} 个略`);
-} else {
-  console.log('🔍 npm 哨兵：无盲区（声明 dsh.bundle 的 npm 包均已在官方 topic 页）');
-}
+  if (sentinels.length) {
+    console.log(`🔍 npm 哨兵：${sentinels.length} 个包声明了 dsh.bundle 但不在官方 topic 页（仅记录，未收录）：`);
+    for (const s of sentinels.slice(0, 30)) console.log(`   - ${s.npm}${s.version ? ' v' + s.version : ''} ${String(s.description || '').slice(0, 60)}`);
+    if (sentinels.length > 30) console.log(`   … 其余 ${sentinels.length - 30} 个略`);
+  } else {
+    console.log('🔍 npm 哨兵：无盲区（声明 dsh.bundle 的 npm 包均已在官方 topic 页）');
+  }
+  if (MODE === 'incremental') {
+    console.log('🔍 npm 哨兵注：增量模式不对新增 npm 独立包做冷探，完整审计以每周全量构建为准');
+  }
 
 sortItems(scope);
 const out = { version: 3, builtAt: Date.now(), quality: true, total: scope.length, items: scope };
 await writeFile(OUT, JSON.stringify(out));
+
+// 1.4.0：产物成功写出后才推进增量窗口。--from-json（离线重建）与 --skip-probe（未做可装判定，
+// 收割到的仓库无探测结论，若推进窗口会永久漏仓）都不推进。
+if (fromIdx === -1 && !skipProbe) {
+  const nextState = {
+    version: 1,
+    lastHarvestAt: BUILD_START,
+    lastFullAt: MODE === 'full' ? BUILD_START : state?.lastFullAt || BUILD_START,
+  };
+  await writeFile(STATE_FILE, JSON.stringify(nextState)).catch(() => {});
+  console.log(`[state] 增量窗口已推进 → ${new Date(BUILD_START).toISOString()}（${STATE_FILE}）`);
+}
 const compat = scope.filter((x) => x.engineCompat === 1).length;
 const undeclared = scope.filter((x) => x.engineCompat !== 1 && x.engineCompat !== 0).length;
 const rich = scope.filter((x) => x.metaScore >= 2).length;

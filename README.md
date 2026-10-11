@@ -56,6 +56,7 @@ git push -u origin master
 由 GitHub Actions `daily-snapshot.yml` 每日两次（北京时间 02:30 / 14:30，GitHub 常延迟数小时）自动构建并提交回 master，jsDelivr（@master）自动生效（分支缓存约 12h）：
 
 - 口径：`topic:dsh-plugin`（★ 不限 + 近 12 个月 + 含 dsh，完整覆盖官方 topic 页）+ npm `keywords:dsh-plugin` 双源归并
+- **增量构建（1.4.0）**：默认自动模式 —— 周日(UTC)/状态缺失/状态>6 天跑全量，其余每日只收割 `pushed:>=上次构建−12h` 的增量（基线=上次快照，缓存回种免冷探），CI 从 12~180 分钟降到分钟级；收割为 0 时中止不发布。显式指定用 `--full` / `--incremental`
 - 分层合规快筛（schema v3）：`dsh.bundle` 硬门禁（installable）→ `dsh.engine` 与桌面端 0.2.0-rc.2 semver 兼容判定（engineCompat，非法 range 一律不判不兼容）→ 展示三件套 metaScore（仅排序）
 - 借星防护：npm 条目仅当 repository 指向 topic 收割到的仓库才合并富化；宿主本体仓（deepseek-ai/deepseek-harness）不借星
 - 手动重建：`node scripts/fetch-cards-snapshot.mjs`（全量，约 12 分钟起）或 `--skip-probe` 快速刷新；`workflow_dispatch` 可在 GitHub Actions 页手动触发云端构建

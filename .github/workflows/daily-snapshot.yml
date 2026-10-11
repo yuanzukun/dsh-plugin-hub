@@ -42,6 +42,8 @@ jobs:
         run: node fetch.mjs
 
       - name: 构建市场快照 cards-snapshot.json
+        # 1.4.0 增量构建：脚本自动判定模式（周日(UTC)/状态缺失或>6天 → 全量；否则增量收割
+        # pushed:>=上次构建−12h，基线=上次快照）。收割为 0 时脚本 exit 1，本步失败即流水线红。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/fetch-cards-snapshot.mjs
