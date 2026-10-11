@@ -57,6 +57,7 @@ git push -u origin master
 
 - 口径：`topic:dsh-plugin`（★ 不限 + 近 12 个月 + 含 dsh，完整覆盖官方 topic 页）+ npm `keywords:dsh-plugin` 双源归并
 - **增量构建（1.4.0）**：默认自动模式 —— 周日(UTC)/状态缺失/状态>6 天跑全量，其余每日只收割 `pushed:>=上次构建−12h` 的增量（基线=上次快照，缓存回种免冷探），CI 从 12~180 分钟降到分钟级；收割为 0 时中止不发布。显式指定用 `--full` / `--incremental`
+- **npm 深分页修复（1.4.1）**：npmjs search 的 `from+size` 上限 ≈5250，超过回绕开头（尾段包静默丢失）——连续 2 页无新包即转 npmmirror 深分页补尾（镜像仅支持纯文本，客户端按 `keywords=dsh-plugin` 过滤，npm 源 5250→6924 条）；search 429 不再切镜像（镜像不解析 `keywords:` 限定符会静默归零）；探测 git 通道 3 次 + 指数退避
 - 分层合规快筛（schema v3）：`dsh.bundle` 硬门禁（installable）→ `dsh.engine` 与桌面端 0.2.0-rc.2 semver 兼容判定（engineCompat，非法 range 一律不判不兼容）→ 展示三件套 metaScore（仅排序）
 - 借星防护：npm 条目仅当 repository 指向 topic 收割到的仓库才合并富化；宿主本体仓（deepseek-ai/deepseek-harness）不借星
 - 手动重建：`node scripts/fetch-cards-snapshot.mjs`（全量，约 12 分钟起）或 `--skip-probe` 快速刷新；`workflow_dispatch` 可在 GitHub Actions 页手动触发云端构建

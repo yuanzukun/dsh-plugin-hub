@@ -32,6 +32,14 @@
 //     - 护栏：收割结果为 0 → exit 1（不发布空快照、不推进增量窗口）；--skip-probe 不推进窗口。
 //     - 状态文件 data/harvest-state.json { version, lastHarvestAt, lastFullAt }，随 data/ 提交。
 //
+//   1.4.1 npm 深分页修复（2026-10-11）：
+//     - 实测 npmjs search 的 from+size 上限 ≈5250，超过回绕到开头（旧代码原地重复翻页，尾段 ~2800 包丢失）
+//     - 回绕检测（连续 2 页无新包）→ npmmirror 深分页补尾（实测 10000 不回绕；镜像仅支持纯文本，
+//       客户端按 keywords=dsh-plugin 过滤）
+//     - 修复 429 failover 隐患：search 不再中途切镜像（镜像不解析 keywords: 限定符 → total=0 静默归零）
+//     - 探测 git 通道 3 次 + 指数退避（长跑后 raw.githubusercontent 限流致 ? 异常爬升到 291）
+//     - 新增 --npm-only 测试开关（跳过 GitHub 收割，只验 npm 源）
+//
 // 产出 public/cards-snapshot.json：
 //   { version:3, builtAt, quality:true, total,
 //     items:[{ full_name, npm, name, version, installable, source, stargazers_count, updated_at, description, topics,
@@ -79,15 +87,15 @@ const ghFromUrl = (u) => {
 };
 
 // ---- 源 A：npm keywords:dsh-plugin ----
-// CI 数据中心 IP 会被 npm registry search 限流（429）：退避重试 + 连续失败切 npmmirror 镜像
-let NPM_HOST_IDX = 0; // 跨页保持：一旦切换镜像，后续分页沿用
-const NPM_HOSTS = ['registry.npmjs.org', 'registry.npmmirror.com'];
+// CI 数据中心 IP 会被 npm registry search 限流（429）：退避重试。
+// 1.4.1 修复：不再中途切 npmmirror —— 镜像 search 不解析 keywords: 限定符（实测 total=0），
+// 切过去会让 npm 源静默归零（2026-10-11 实测发现）；限流耗尽就抛错让流水线红，而不是空数据。
+const NPM_SEARCH_HOST = 'registry.npmjs.org';
 async function searchPage(from, SIZE) {
   for (let attempt = 1; ; attempt++) {
-    const host = NPM_HOSTS[NPM_HOST_IDX];
     let r;
     try {
-      r = await fetch(`https://${host}/-/v1/search?text=keywords:dsh-plugin&size=${SIZE}&from=${from}`,
+      r = await fetch(`https://${NPM_SEARCH_HOST}/-/v1/search?text=keywords:dsh-plugin&size=${SIZE}&from=${from}`,
         { signal: AbortSignal.timeout(20000) });
     } catch (e) { // 超时/网络错误也走退避
       if (attempt >= 6) throw e;
@@ -100,43 +108,93 @@ async function searchPage(from, SIZE) {
       if (attempt >= 6) throw new Error('npm search HTTP ' + r.status + '（重试耗尽）');
       const retryAfter = Number(r.headers.get('retry-after')) || 0;
       const waitMs = Math.min((retryAfter || Math.pow(2, attempt) * 3) * 1000, 90000);
-      console.log(`npm search HTTP ${r.status}（from=${from}，host=${host}）${Math.round(waitMs / 1000)}s 后第 ${attempt} 次重试`);
-      if (attempt >= 3 && NPM_HOST_IDX === 0) {
-        NPM_HOST_IDX = 1;
-        console.log('→ 连续 429/5xx，切换 npmmirror 镜像继续');
-      }
+      console.log(`npm search HTTP ${r.status}（from=${from}）${Math.round(waitMs / 1000)}s 后第 ${attempt} 次重试`);
       await sleep(waitMs);
       continue;
     }
     throw new Error('npm search HTTP ' + r.status);
   }
 }
+// npm search 深分页实测（2026-10-11）：npmjs 的 from+size 上限 ≈5250，超过即回绕到 from=0
+// （size=250 时 from=5000 正常、5250 起回绕；size=5 时 from=5100 已回绕）→ 单查询最多 5250 条，
+// 尾段静默丢失，且旧代码原地重复翻页到哨兵截断（from=5250 连续 14 轮 +250 cum 不动）。
+// 补尾：npmmirror 镜像 search 支持深分页（实测 from=9750 不回绕，上限 10000），
+// 但镜像只支持纯文本、不解析 keywords: 限定符 → 用 text=dsh-plugin + 客户端 keywords 过滤兜底尾段。
+// 残余漏检：keyword 含 dsh-plugin 但 name/description 均不含该词的包（预计极少），以哨兵审计兜底。
+const NPM_PAGE_MS = 800;
+function npmEntry(p) {
+  return {
+    npm: p.name,
+    name: p.name,
+    version: p.version || '',
+    description: (p.description || '').slice(0, 500),
+    topics: normTopics(p.keywords),
+    updated_at: p.date || '',
+    full_name: ghFromUrl(p.links && p.links.repository),
+    stargazers_count: 0,
+    source: 'npm',
+  };
+}
 async function fetchNpm() {
   const out = new Map();
   const SIZE = 250;
+  let repeatStreak = 0, wrapped = false;
   for (let from = 0; ; from += SIZE) {
     const d = await searchPage(from, SIZE);
     const objs = d.objects || [];
+    let fresh = 0;
     for (const o of objs) {
       const p = o.package || {};
-      if (!p.name) continue;
-      out.set(p.name, {
-        npm: p.name,
-        name: p.name,
-        version: p.version || '',
-        description: (p.description || '').slice(0, 500),
-        topics: normTopics(p.keywords),
-        updated_at: p.date || '',
-        full_name: ghFromUrl(p.links && p.links.repository),
-        stargazers_count: 0,
-        source: 'npm',
-      });
+      if (!p.name || out.has(p.name)) continue;
+      fresh++;
+      out.set(p.name, npmEntry(p));
     }
-    console.log(`npm search: +${objs.length} cum=${out.size} (total=${d.total})`);
+    console.log(`npm search: +${objs.length}（新 ${fresh}）cum=${out.size} (total=${d.total})`);
+    // 回绕检测：一页全无新包 → 连续 2 页即判定分页失效（正常分页不该整页重复）
+    if (fresh === 0 && out.size > 0) {
+      repeatStreak++;
+      if (repeatStreak >= 2) {
+        wrapped = true;
+        console.log(`npm search: 深分页回绕（from=${from + SIZE} 连续 ${repeatStreak} 页无新包）→ 转镜像补尾`);
+        break;
+      }
+    } else repeatStreak = 0;
     if (from + SIZE >= (d.total || 0) || objs.length === 0) break;
-    await sleep(800);
+    await sleep(NPM_PAGE_MS);
   }
+  if (wrapped) await fetchNpmMirrorTail(out);
   return out;
+}
+
+// 镜像补尾：npmmirror 纯文本 + 客户端 keywords 过滤（镜像不解析 keywords: 限定符）
+async function fetchNpmMirrorTail(out) {
+  const SIZE = 250;
+  const HOST = 'registry.npmmirror.com';
+  let added = 0, filtered = 0;
+  for (let from = 0; ; from += SIZE) {
+    let d;
+    try {
+      const r = await fetch(`https://${HOST}/-/v1/search?text=dsh-plugin&size=${SIZE}&from=${from}`,
+        { signal: AbortSignal.timeout(20000) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      d = await r.json();
+    } catch (e) {
+      console.log(`npm mirror tail: from=${from} ${e.message || e.name}，中止补尾（已补 ${added}）`);
+      return;
+    }
+    const objs = d.objects || [];
+    for (const o of objs) {
+      const p = o.package || {};
+      if (!p.name || out.has(p.name)) continue;
+      if (!(p.keywords || []).some(k => String(k).toLowerCase() === 'dsh-plugin')) { filtered++; continue; }
+      out.set(p.name, npmEntry(p));
+      added++;
+    }
+    console.log(`npm mirror tail: from=${from} 拉取 ${objs.length} 补 ${added} cum=${out.size} (total=${d.total})`);
+    if (objs.length === 0 || from + SIZE >= (d.total || 0) || from + SIZE >= 10000) break;
+    await sleep(NPM_PAGE_MS);
+  }
+  console.log(`npm mirror tail 完成: 补 ${added} 条（非 keyword 过滤掉 ${filtered}）`);
 }
 
 // ---- 源 A+：种子补录（绕过 search 索引延迟与 GitHub 质量门槛）----
@@ -451,8 +509,9 @@ async function probeManifest(item, cache, opts = {}) {
     } catch { /* 落到 git 通道 */ }
   }
   // git 通道：raw package.json（HEAD 重定向默认分支）
+  // 1.4.1：3 次 + 指数退避 —— 长跑后 raw.githubusercontent 限流（2026-10-11 全量实测 ? 异常爬到 291）
   if (item.full_name) {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const r = await fetch(`https://raw.githubusercontent.com/${item.full_name}/HEAD/package.json`,
           { signal: AbortSignal.timeout(9000) });
@@ -463,6 +522,7 @@ async function probeManifest(item, cache, opts = {}) {
           cache['gh:' + item.full_name] = res;
           return res;
         }
+        if (attempt < 2) await sleep(2000 * Math.pow(2, attempt)); // 403/429 等 → 2s/4s 退避
       } catch { await sleep(500); }
     }
   }
@@ -567,6 +627,9 @@ if (fromIdx > -1) {
       topics: normTopics(it.topics), source: 'github',
     });
   }
+} else if (args.includes('--npm-only')) {
+  // --npm-only 测试开关（1.4.1）：跳过 GitHub 收割，只验 npm 源链路（回绕检测 + 镜像补尾）
+  console.log('[mode] --npm-only：跳过 GitHub 收割，仅测试 npm 源');
 } else {
   if (MODE === 'incremental') {
     if (!state?.lastHarvestAt) {
@@ -613,6 +676,12 @@ if (!args.includes('--github-only')) {
     seeded++;
   }
   console.log(`seed 补录: +${seeded}/${SEED_PACKAGES.length}`);
+}
+if (args.includes('--npm-only')) {
+  let withRepo = 0;
+  for (const v of npmMap.values()) if (v.full_name) withRepo++;
+  console.log(`--npm-only 结束: npm 源 ${npmMap.size} 条（含 repository 关联 ${withRepo}），不写快照`);
+  process.exit(0);
 }
 
 const items = [...merge(npmMap, ghMap).values()];
