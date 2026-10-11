@@ -40,6 +40,12 @@
 //     - 探测 git 通道 3 次 + 指数退避（长跑后 raw.githubusercontent 限流致 ? 异常爬升到 291）
 //     - 新增 --npm-only 测试开关（跳过 GitHub 收割，只验 npm 源）
 //
+//   1.4.2 一仓一卡去重（2026-10-11 审计）：
+//     - 实测快照 16422 条仅对应 13602 个独立仓库（2820 条冗余：2670 例「gh 裸卡+npm 包卡」并存，
+//       39 仓多包，dsh-market/dsh-market 以 4 张同星数卡占据 Top10 四席）
+//     - 收口：仓库有 ≥1 个 npm 包卡时不再输出 gh: 裸卡（npm 卡已携带 full_name/stars/topics，
+//       git 通道信息无损失）；monorepo 多包仍各占一卡（0.9.0 每包=可装单元口径不变）
+//
 // 产出 public/cards-snapshot.json：
 //   { version:3, builtAt, quality:true, total,
 //     items:[{ full_name, npm, name, version, installable, source, stargazers_count, updated_at, description, topics,
@@ -416,12 +422,15 @@ const sortItems = (items) => {
   const rank = (x) => (x.installable === false ? 1 : 0);
   return items.sort((a, b) => rank(a) - rank(b) || b.stargazers_count - a.stargazers_count);
 };
+// 1.4.2 去重（2026-10-11 审计）：此前同一仓库会产出「gh: 裸卡 + npm: 包卡」并存
+//（实测 16422 条中 2709 个仓库重复、2820 条冗余：2670 例一仓双卡 + 39 仓多包，
+// dsh-market/dsh-market 以 4 张同星数卡片占据 Top10 四席）。
+// 收口规则：**仓库有 ≥1 个 npm 包卡时，gh: 裸卡不再输出**——终端用户装的是包不是仓库，
+// npm 包卡（source=both）已携带 full_name/stars/topics，git 通道信息无损失；
+// monorepo 多包仍各占一卡（每包是独立可装单元，0.9.0 口径不变）。
 function merge(npmMap, ghMap) {
   const merged = new Map();
-  for (const [fn, g] of ghMap) {
-    if (HOST_REPOS.has(fn.toLowerCase())) continue; // 宿主本体不作为插件条目
-    merged.set('gh:' + fn, g);
-  }
+  const coveredRepos = new Set(); // 已有 npm 包卡的仓库（小写 full_name）
   for (const [pn, n] of npmMap) {
     // 0.9.1 修复：ghMap 的 key 是裸 full_name（harvestGithub/--from-json 均无 'gh:' 前缀），
     // 上一版误查 'gh:' + full_name 导致归并永远 miss（914 条 both 将分裂、npm 条目 stars/topics 降级）。
@@ -432,6 +441,7 @@ function merge(npmMap, ghMap) {
     const pointsToHost = n.full_name && HOST_REPOS.has(n.full_name.toLowerCase());
     const g = n.full_name && !pointsToHost ? ghMap.get(n.full_name) : null;
     if (g) {
+      coveredRepos.add(n.full_name.toLowerCase());
       // 每包一条目，仓库信息富化（不删除、不覆盖其他包的条目）
       merged.set('npm:' + pn, {
         ...n,
@@ -445,6 +455,11 @@ function merge(npmMap, ghMap) {
     } else {
       merged.set('npm:' + pn, { ...n });
     }
+  }
+  for (const [fn, g] of ghMap) {
+    if (HOST_REPOS.has(fn.toLowerCase())) continue; // 宿主本体不作为插件条目
+    if (coveredRepos.has(fn.toLowerCase())) continue; // 1.4.2：已有 npm 包卡的仓库，跳过裸卡
+    merged.set('gh:' + fn, g);
   }
   return merged;
 }

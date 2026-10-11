@@ -1,17 +1,18 @@
 version: '1.0'
-name: dsh-hub-daily
-displayName: 'DSH 插件目录每日更新'
-description: '每天抓取 GitHub+npm 上的 dsh 插件，重新生成 public/plugins.json 并提交，Gitee Pages 自动重建。'
+name: dsh-hub-mirror
+displayName: 'GitHub → Gitee 镜像同步（供 Gitee Pages 部署）'
+description: '每日把 GitHub master 同步到 Gitee，Gitee Pages 自动重建。数据构建已统一收口到 GitHub Actions（daily-snapshot），本流水线不再自行抓取构建（2026-10-11：消除双 CI 对 plugins.json 的互相覆盖）。'
 
 triggers:
   trigger: auto
   schedule:
-    # 北京时间 09:00（Quartz 格式：秒 分 时 日 月 周）
-    - cron: '0 0 9 * * ?'
+    # 北京时间 09:30（Quartz 格式：秒 分 时 日 月 周）
+    # 排在 GitHub Actions 02:30 构建之后，把当日快照镜像过来
+    - cron: '0 30 9 * * ?'
 
 stages:
-  - name: update
-    displayName: '抓取并更新插件数据'
+  - name: mirror
+    displayName: '镜像同步 GitHub master → Gitee master'
     strategy: naturally
     trigger: auto
     executor: []
@@ -22,16 +23,15 @@ stages:
         with:
           ref: master
       - step: build@nodejs
-        name: build_nodejs
-        displayName: 'Nodejs 构建'
+        name: sync
+        displayName: '同步远端'
         nodeVersion: 20.11.0
         commands:
           - 'git config user.email "bot@dsh-hub.local"'
           - 'git config user.name "dsh-hub-bot"'
-          - 'npm config set registry https://registry.npmmirror.com'
-          - 'node fetch.mjs'
-          - 'git add public/plugins.json'
-          - 'git commit -m "chore: daily plugin update $(date +%F)" || echo "no changes"'
+          # GitHub 是唯一权威数据源：强制对齐其 master（丢弃 Gitee 侧任何本地分歧）
+          - 'git fetch https://github.com/yuanzukun/dsh-plugin-hub.git master'
+          - 'git reset --hard FETCH_HEAD'
           - 'git push ${PUSH_URL} HEAD:master'
         caches:
           - ~/.npm

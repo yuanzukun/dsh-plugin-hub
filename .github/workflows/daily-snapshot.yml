@@ -36,14 +36,10 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
-      - name: 构建插件目录 plugins.json（GitHub topic 主源 + npm keywords 补充）
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node fetch.mjs
-
       - name: 构建市场快照 cards-snapshot.json
         # 1.4.0 增量构建：脚本自动判定模式（周日(UTC)/状态缺失或>6天 → 全量；否则增量收割
         # pushed:>=上次构建−12h，基线=上次快照）。收割为 0 时脚本 exit 1，本步失败即流水线红。
+        # 1.4.2 一仓一卡去重：仓库有 npm 包卡时不再输出 gh 裸卡（16422→~13.7k 条）。
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/fetch-cards-snapshot.mjs
@@ -57,6 +53,18 @@ jobs:
           LLM_MODEL: deepseek-chat
           AGNES_KEY: ${{ secrets.AGNES_API_KEY }}
         run: node scripts/translate-snapshot.mjs
+
+      - name: 构建插件目录 plugins.json（v2.0 统一管线：消费快照 + 分类 + 中文继承）
+        # 2026-10-11 修复三连：
+        #   ① 必须排在快照构建与翻译之后 —— hub 直接继承 description_zh（此前 fetch.mjs 在最前，
+        #      中文只能靠自身实时翻译，而 CI 从未注入 AGNES_KEY → 中文覆盖率长期 17/2769）；
+        #   ② 注入 AGNES_KEY，仅对快照未覆盖的描述做 Agnes 兜底（译文回写 tx-cache 持久化，
+        #      不再每天白烧配额重翻同样内容）；
+        #   ③ fetch.mjs v2 自身不再抓取，数据源 = cards-snapshot.json（市场口径 + 一仓一卡）。
+        env:
+          AGNES_KEY: ${{ secrets.AGNES_API_KEY }}
+          MAX_TRANSLATE: 200
+        run: node fetch.mjs
 
       - name: 提交产物回 master
         run: |

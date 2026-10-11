@@ -144,7 +144,9 @@ async function copy(text) {
 
 async function init() {
   try {
-    const res = await fetch('plugins.json', { cache: 'no-store' });
+    // 默认 HTTP 缓存（Gitee Pages 带 Last-Modified，未变更时 304 秒回）；
+    // 数据每日更新一次，v2 目录体量 ~8MB，no-store 会导致每次进站全量重下
+    const res = await fetch('plugins.json');
     const data = await res.json();
     PLUGINS = data.plugins || [];
     metaEl.textContent = `共 ${data.count ?? PLUGINS.length} 个插件 · 更新于 ${fmtDate(data.generatedAt)}`;
