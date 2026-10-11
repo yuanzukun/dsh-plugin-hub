@@ -40,11 +40,16 @@
 //     - 探测 git 通道 3 次 + 指数退避（长跑后 raw.githubusercontent 限流致 ? 异常爬升到 291）
 //     - 新增 --npm-only 测试开关（跳过 GitHub 收割，只验 npm 源）
 //
-//   1.4.2 一仓一卡去重（2026-10-11 审计）：
+// 1.4.2 一仓一卡去重（2026-10-11 审计；v2 修订：去重移到探测后执行）：
 //     - 实测快照 16422 条仅对应 13602 个独立仓库（2820 条冗余：2670 例「gh 裸卡+npm 包卡」并存，
 //       39 仓多包，dsh-market/dsh-market 以 4 张同星数卡占据 Top10 四席）
-//     - 收口：仓库有 ≥1 个 npm 包卡时不再输出 gh: 裸卡（npm 卡已携带 full_name/stars/topics，
-//       git 通道信息无损失）；monorepo 多包仍各占一卡（0.9.0 每包=可装单元口径不变）
+//     - 收口：仓库存在「可装的 npm 包卡」时丢弃 gh 裸卡（npm 卡已携带 full_name/stars/topics，
+//       git 通道信息无损失）；monorepo 多包仍各占一卡（每包=可装单元，0.9.0 口径不变）
+//     - v2 修订理由：merge() 发生在快筛（probeAll）之前，彼时 installable 未知。若在 merge 时
+//       无条件丢裸卡，会出现盲区——仓库的 npm 包未发布 dsh.bundle（installable=false 被市场口径
+//       剔除）而 git HEAD 已声明（裸卡本可作 git 通道兜底）→ 该仓库从快照彻底消失，且增量模式
+//       下要到下个周日全量才可能回来。改为探测后去重：仅当存在可装 npm 卡才丢裸卡，
+//       否则保留裸卡（语义与客户端 0.9.10 dedupItems 的 installable 优先级一致）
 //
 // 产出 public/cards-snapshot.json：
 //   { version:3, builtAt, quality:true, total,
@@ -422,15 +427,14 @@ const sortItems = (items) => {
   const rank = (x) => (x.installable === false ? 1 : 0);
   return items.sort((a, b) => rank(a) - rank(b) || b.stargazers_count - a.stargazers_count);
 };
-// 1.4.2 去重（2026-10-11 审计）：此前同一仓库会产出「gh: 裸卡 + npm: 包卡」并存
-//（实测 16422 条中 2709 个仓库重复、2820 条冗余：2670 例一仓双卡 + 39 仓多包，
-// dsh-market/dsh-market 以 4 张同星数卡片占据 Top10 四席）。
-// 收口规则：**仓库有 ≥1 个 npm 包卡时，gh: 裸卡不再输出**——终端用户装的是包不是仓库，
-// npm 包卡（source=both）已携带 full_name/stars/topics，git 通道信息无损失；
-// monorepo 多包仍各占一卡（每包是独立可装单元，0.9.0 口径不变）。
+// 1.4.2 一仓一卡去重：在 probeAll 之后执行（见 dedupAfterProbe）。
+// merge() 保持双源全量归并（裸卡入列参与快筛），保证可装性信息完整后再收口。
 function merge(npmMap, ghMap) {
   const merged = new Map();
-  const coveredRepos = new Set(); // 已有 npm 包卡的仓库（小写 full_name）
+  for (const [fn, g] of ghMap) {
+    if (HOST_REPOS.has(fn.toLowerCase())) continue; // 宿主本体不作为插件条目
+    merged.set('gh:' + fn, g);
+  }
   for (const [pn, n] of npmMap) {
     // 0.9.1 修复：ghMap 的 key 是裸 full_name（harvestGithub/--from-json 均无 'gh:' 前缀），
     // 上一版误查 'gh:' + full_name 导致归并永远 miss（914 条 both 将分裂、npm 条目 stars/topics 降级）。
@@ -441,7 +445,6 @@ function merge(npmMap, ghMap) {
     const pointsToHost = n.full_name && HOST_REPOS.has(n.full_name.toLowerCase());
     const g = n.full_name && !pointsToHost ? ghMap.get(n.full_name) : null;
     if (g) {
-      coveredRepos.add(n.full_name.toLowerCase());
       // 每包一条目，仓库信息富化（不删除、不覆盖其他包的条目）
       merged.set('npm:' + pn, {
         ...n,
@@ -456,12 +459,28 @@ function merge(npmMap, ghMap) {
       merged.set('npm:' + pn, { ...n });
     }
   }
-  for (const [fn, g] of ghMap) {
-    if (HOST_REPOS.has(fn.toLowerCase())) continue; // 宿主本体不作为插件条目
-    if (coveredRepos.has(fn.toLowerCase())) continue; // 1.4.2：已有 npm 包卡的仓库，跳过裸卡
-    merged.set('gh:' + fn, g);
-  }
   return merged;
+}
+
+/** 1.4.2 一仓一卡去重（探测后执行）：
+ *  同仓库同时存在 gh 裸卡（npm=''）与 npm 包卡时，若该仓库有「可装（installable===true）」的
+ *  npm 卡则丢弃裸卡；否则保留裸卡 —— 覆盖「dsh.bundle 只在 git HEAD、尚未发布到 npm」的仓库
+ *  （此时 npm 卡 installable=false 会被市场口径剔除，裸卡是唯一可装通道，不能丢）。
+ *  npm 包卡全部保留（monorepo 多包 = 多个可装单元，0.9.0 口径；客户端 0.9.10 dedupItems
+ *  会按 full_name 收敛展示，与本函数语义一致）。 */
+function dedupAfterProbe(items) {
+  const repoHasInstallableNpm = new Set();
+  for (const x of items) {
+    if (x.npm && x.installable === true && x.full_name) repoHasInstallableNpm.add(x.full_name.toLowerCase());
+  }
+  const out = [];
+  let dropped = 0;
+  for (const x of items) {
+    if (!x.npm && x.full_name && repoHasInstallableNpm.has(x.full_name.toLowerCase())) { dropped++; continue; }
+    out.push(x);
+  }
+  if (dropped) console.log(`[dedup] 一仓一卡：丢弃 ${dropped} 张 gh 裸卡（对应仓库已有可装 npm 包卡）`);
+  return out;
 }
 
 // ---- 快筛：dsh.bundle 声明 + version + 分层合规字段（带 7 天断点缓存，schema v2）----
@@ -711,19 +730,23 @@ if (prevSnapshot && Array.isArray(prevSnapshot.items) && prevSnapshot.items.leng
 if (!skipProbe) await probeAll(items, probeCache, { noColdNpm: MODE === 'incremental' });
 else await saveProbeCache(probeCache);
 
+// 1.4.2 一仓一卡去重（探测后执行，installable 信息完整；--skip-probe 时无探测结论，
+// 裸卡全保留，去重退化为 no-op —— 产物仅供调试不发布，无影响）
+const dedupedItems = dedupAfterProbe(items);
+
 // 1.3.0 市场口径（用户决策 2026-10-11）：快照只收录「官方 topic:dsh-plugin 内、通过官方硬门禁」的仓库。
 //   剔除 source=npm（不在 topic 页的 npm 独立包；npm 源已通过 merge 为 topic 仓库富化版本/可装信息）、
 //   installable=false（未声明 dsh.bundle，宿主拒装）、engineCompat=0（引擎不兼容，装上即坏）。
 //   installable=null（探测失败）同样剔除，交下一轮每日重建自然补回。
 //   --skip-probe（快速刷新）时无快筛数据，只剔 npm 侧、不做可装过滤（产物仅供调试，不发布）。
-const nNpmOnly = items.filter((x) => x.source === 'npm').length;
-const nNotInst = items.filter((x) => x.source !== 'npm' && x.installable === false).length;
-const nUnknown = items.filter((x) => x.source !== 'npm' && x.installable == null).length;
-const nIncompat = items.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat === 0).length;
+const nNpmOnly = dedupedItems.filter((x) => x.source === 'npm').length;
+const nNotInst = dedupedItems.filter((x) => x.source !== 'npm' && x.installable === false).length;
+const nUnknown = dedupedItems.filter((x) => x.source !== 'npm' && x.installable == null).length;
+const nIncompat = dedupedItems.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat === 0).length;
 const scope = skipProbe
-  ? items.filter((x) => x.source !== 'npm')
-  : items.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat !== 0);
-console.log(`市场口径过滤：${items.length} → ${scope.length}（npm 独立 ${nNpmOnly}，未声明 bundle ${nNotInst}，探测失败 ${nUnknown}，引擎不兼容 ${nIncompat}${skipProbe ? '，skip-probe 未做可装过滤' : ''}）`);
+  ? dedupedItems.filter((x) => x.source !== 'npm')
+  : dedupedItems.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat !== 0);
+console.log(`市场口径过滤：${dedupedItems.length} → ${scope.length}（npm 独立 ${nNpmOnly}，未声明 bundle ${nNotInst}，探测失败 ${nUnknown}，引擎不兼容 ${nIncompat}${skipProbe ? '，skip-probe 未做可装过滤' : ''}）`);
 
 // 1.3.1 npm 侧哨兵（方案 C 第 2 层，2026-10-11）：发现「声明了 dsh.bundle 但不在官方 topic 页」的包，仅记录不收录。
 //   出路：① 作者补打 topic:dsh-plugin → 下轮自动收录（口径自愈）；② 确认值得收录的走种子白名单（第 3 层，待定）。
