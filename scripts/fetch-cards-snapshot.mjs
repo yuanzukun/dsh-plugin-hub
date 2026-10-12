@@ -763,6 +763,26 @@ const sentinels = items.filter((x) => x.source === 'npm' && x.installable === tr
   }
 
 sortItems(scope);
+
+// 1.4.3 重复行守卫（2026-10-12）：#44 实测 2470 组完全相同条目（同 full_name 同 npm）穿透到产物，
+//   raw 膨胀 13748→16270（+18% 体积/索引噪音）。dedupAfterProbe 只收敛 gh 裸卡，不防同行重复——
+//   上游抓取瞬时异常（分页重复/探针重试附加）无失败信号，靠此处兜底告警。客户端 dedupItems 能收敛
+//   显示层，故只告警不阻断（避免守卫本身挡住自愈性重建）。
+const dupCount = new Map();
+for (const x of scope) {
+  const k = (x.full_name || '') + '\u0000' + (x.npm || '');
+  dupCount.set(k, (dupCount.get(k) || 0) + 1);
+}
+const dupExtra = [...dupCount.values()].reduce((s, n) => s + (n - 1), 0);
+const dupRatio = scope.length ? dupExtra / scope.length : 0;
+if (dupExtra > 0) {
+  const msg = `重复行守卫：${dupExtra} 条多余重复（占 ${(dupRatio * 100).toFixed(1)}%），疑上游抓取异常`;
+  console.log(`⚠️ ${msg}`);
+  if (dupRatio > 0.01) console.log(`::warning::${msg}（阈值 1%，请检查上游抓取分页/探针附加逻辑）`);
+  const dupSamples = [...dupCount.entries()].filter(([, n]) => n > 1).slice(0, 10);
+  for (const [k, n] of dupSamples) console.log(`   - ${k.replace('\u0000', ' | npm=')} ×${n}`);
+}
+
 const out = { version: 3, builtAt: Date.now(), quality: true, total: scope.length, items: scope };
 await writeFile(OUT, JSON.stringify(out));
 
