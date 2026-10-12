@@ -100,13 +100,16 @@ async function main() {
   }
   console.log(`translate: 条目 ${snap.items.length}（原文中文 ${alreadyZh} / 空 ${empty} / 缓存命中 ${cached} / 占位跳过 ${placeholder} / 待翻译唯一描述 ${need.size}）`);
   if (DRY) { console.log('translate: --dry-run，结束'); return; }
-  if (!need.size) { console.log('translate: 无待翻译项'); return; }
+  // 2026-10-12 修复：无待译 / 无 Key 不再提前 return —— tx-cache 已有但快照缺 description_zh 的
+  // 条目（快照口径重建后常见）必须落到下方回写段，否则缓存命中永远无法体现到快照。
 
-  const target = await resolveTarget();
-  if (!target) {
+  const target = need.size ? await resolveTarget() : null;
+  if (!target && need.size) {
     console.warn('translate: 未找到可用 Key（LLM_API_KEY / AGNES_KEY / ~/.workbuddy/agnes_api_key.txt），跳过翻译（客户端运行时翻译兜底）');
-    return;
   }
+  let done = 0, ok = 0, fail = 0; // translateLoop 块外的函数作用域声明：结尾汇总日志也要读
+  translateLoop: {
+  if (!target) break translateLoop;
   const { key: API_KEY, endpoint: ENDPOINT_RAW, model: MODEL } = target;
   const ENDPOINT = ENDPOINT_RAW.replace(/\/+$/, '');
   console.log(`translate: 使用 ${ENDPOINT}（model=${MODEL}）`);
@@ -159,13 +162,14 @@ async function main() {
     const out = {};
     for (const h of batch) {
       const v = typeof parsed[h] === 'string' ? parsed[h].trim() : '';
-      if (v && v.length <= TX_MAX && hasCJK(v) && v !== need.get(h)) out[h] = v; // 校验：含 CJK、非原文复述
-      else out[h] = need.get(h); // 0.9.17：LLM 判定无可译内容（产品名/单词）→ 标记性回写原文，客户端显示原文且不计入未翻译
+      // 校验：含 CJK、非原文复述才收；无 CJK/缺 key 不回写（2026-10-12 修复）——
+      // 旧逻辑把 LLM 漏 key/幻影输出标成「已译」（缓存存原文 → 永不重试 → 快照永久英文残留，
+      // 实测 tx-cache 11180 条中 52 条污染、37 条自然语言描述受害显示英文）。
+      // 真占位描述已被 isPlaceholderDesc 挡在 need 外，重试成本每天最多几十条、可忽略。
+      if (v && v.length <= TX_MAX && hasCJK(v) && v !== need.get(h)) out[h] = v;
     }
     return out;
   }
-
-  let done = 0, ok = 0, fail = 0;
   const queue = batches.slice();
   // 429 全局冷却：免费档 Key 也能慢速稳跑（检测到限流 → 全队暂停 60s，期间不烧批次）
   let cooling = null;
@@ -205,6 +209,8 @@ async function main() {
       }
     }
   }));
+
+  } // translateLoop
 
   // ---- 回写快照 + 缓存 ----
   let applied = 0;
