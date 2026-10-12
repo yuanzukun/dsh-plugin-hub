@@ -20,6 +20,18 @@
 //   1.3.0 市场口径（用户决策 2026-10-11）：快照只收录「官方 topic:dsh-plugin 内、通过官方硬门禁」的仓库
 //   —— 产出前剔除 npm 独立条目（source=npm）、未声明 dsh.bundle（installable=false）、
 //   探测失败（null，下轮重建补回）与引擎不兼容（engineCompat=0）。快照 = 市场内容，口径在数据源侧收口。
+//   1.5.0 npm 同名挂链全量化（2026-10-12，用户需求「不开 VPN 也要能装」）：
+//     对 gh 裸卡（source=github 且 npm=''）按「仓库名=npm 包名」惯例全量探测 npmmirror，
+//     命中（同名 + repository 一致或缺失 + 声明 dsh.bundle）即挂链 → 客户端安装走 npm 稳定通道。
+//     校验口径与客户端 verifyNpmCandidate 对齐；负结果缓存 7 天（link: 键），增量只探新增。
+//     --no-npm-link 可跳过。
+//
+//   1.6.0 tgz 镜像池（2026-10-12，Zotero 中文社区模式）：挂链全量化后仍有 ~6900 条 npm 无同名包，
+//     安装只能赌 github 直连。CI 重建时把 github 独源条目 tarball 预构建进 public/tgz/{owner}__{repo}.tgz
+//     （star 降序 + --tgz-limit 截断，默认 2000/轮；pushedAt 未变走 data/tgz-cache.json 零下载复用；
+//     >20MB 跳过——jsDelivr gh 单文件上限；记 sha256 锚定产物），条目带 tgz/tgzSha256 字段进快照，
+//     客户端 0.9.24 降级梯（npm 探测 → tgz 镜像 → codeload 直连 → 原通道重试 ×2）优先消费镜像。
+//     --no-tgz 可跳过。
 //
 //   1.4.0 增量构建（2026-10-11，治理 CI 超时 #33/#34 与 0★ 新仓潮收割成本）：
 //     - 模式判定：--full / --incremental 显式指定；缺省自动 —— 周日(UTC)、无状态文件、
@@ -69,7 +81,7 @@
 //    同类型限定符后者覆盖前者 → 星数/时间必须合并单区间。
 //    快筛断点续跑：data/probe-cache.json（7 天有效），重跑只补缺。
 
-import { writeFile, readFile } from 'node:fs/promises';
+import { writeFile, readFile, mkdir, readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import { satisfies, validRange } from 'semver';
@@ -483,6 +495,73 @@ function dedupAfterProbe(items) {
   return out;
 }
 
+// ---- 1.5.0 npm 同名挂链全量化（用户需求 2026-10-12「不开 VPN 也要能装」）----
+// 背景：npm 来源安装走宿主 registryPlan 带 NPMMIRROR 兜底（大陆稳定），git 来源要克隆 github.com
+// （大陆直连间歇劣化，clone 中途被 RST 必失败）。原挂链只靠 npm search 的 links.repository 关联
+// （2846/13748 ≈ 20.7%），同名惯例（仓库名=npm 包名）大量漏挂（2026-10-12 抽样 40 条实测 15 条存在）。
+// 本扫对 gh 裸卡全量探测同名包，命中即挂链（npm 字段 + source='both'）→ 客户端 specOf 产出 npm spec，
+// 天生走稳定通道，客户端降级链退为兜底。
+// 校验口径与客户端 verifyNpmCandidate 一致：manifest.name 须与仓库名同名；repository 字段存在则必须
+// 指向同 owner/repo（防同名抢注包）；npm manifest 须声明 dsh.bundle（未声明的挂了宿主也拒装，不挂）。
+// 负结果同样缓存（link: 键独立命名空间，7 天 TTL），日常增量只探新增，不重复打 registry。
+const LINK_TTL_MS = 7 * 24 * 3600 * 1000;
+const NPM_LINK_CONCURRENCY = 6;
+function repoFieldMatches(m, fullName) {
+  const r = m.repository;
+  const url = r && typeof r === 'object' ? r.url : r;
+  if (!url) return true; // 无 repository 字段 → 仅同名弱信号（与客户端口径一致）
+  return String(url).toLowerCase().includes(fullName.toLowerCase());
+}
+/** 探测单个候选：返回 { miss:true }（确认不存在/校验不过）/ { miss:false, manifest } / { miss:null }（网络故障不判负） */
+async function probeNpmLink(item) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch(`https://registry.npmmirror.com/${encodeURIComponent(item.name)}/latest`, { signal: AbortSignal.timeout(10000) });
+      if (r.status === 404) return { miss: true };
+      if (r.ok) {
+        const m = await r.json();
+        if (m && m.name === item.name && m.dsh && m.dsh.bundle && repoFieldMatches(m, item.full_name)) {
+          return { miss: false, manifest: m };
+        }
+        return { miss: true }; // 存在但不同名/无 bundle/repository 指向别仓 → 不挂
+      }
+      if (attempt < 1) await sleep(2000); // 403/429/5xx → 2s 退避重试一次
+    } catch { if (attempt < 1) await sleep(1000); }
+  }
+  return { miss: null };
+}
+/** 全量同名挂链扫。cache = probe-cache（link: 键与 npm:/gh: 探测键共存同文件，互不干扰）。 */
+async function npmLinkSweep(items, cache) {
+  const targets = items.filter((x) => x.source === 'github' && !x.npm && x.full_name && x.name
+    && !HOST_REPOS.has(x.full_name.toLowerCase())
+    && /^[a-z0-9][a-z0-9._-]*$/.test(x.name)); // npm 包名恒小写，含大写的仓库名不可能同名，跳过省请求
+  let linked = 0, neg = 0, cached = 0, err = 0, idx = 0;
+  async function worker() {
+    while (idx < targets.length) {
+      const it = targets[idx++];
+      const k = 'link:' + it.full_name;
+      const hit = cache[k];
+      if (hit && hit.v === 2 && Date.now() - hit.ts < LINK_TTL_MS) {
+        cached++;
+        if (hit.linked) { it.npm = it.name; it.source = 'both'; linked++; } // 上轮已挂：直接复用结论
+        else neg++;
+        continue;
+      }
+      const res = await probeNpmLink(it);
+      if (res.miss === true) { cache[k] = { v: 2, linked: false, ts: Date.now() }; neg++; }
+      else if (res.miss === false) {
+        cache[k] = { v: 2, linked: true, ts: Date.now() };
+        it.npm = it.name; it.source = 'both'; linked++;
+        // 顺带把 npm manifest 合规结论写进探测缓存 → probeAll 命中免再抓（与 npm 通道快筛同源同键）
+        cache['npm:' + it.name] = { ...manifestCompliance(res.manifest), v: 2 };
+      } else err++; // miss=null 网络故障：不缓存，下轮重试
+      if (idx % 500 === 0) console.log(`[npm-link] 进度 ${idx}/${targets.length}（已挂 ${linked}）`);
+    }
+  }
+  await Promise.all(Array.from({ length: NPM_LINK_CONCURRENCY }, worker));
+  return { linked, neg, cached, err, probed: targets.length - cached };
+}
+
 // ---- 快筛：dsh.bundle 声明 + version + 分层合规字段（带 7 天断点缓存，schema v2）----
 // 1.2.0：从 manifest 提取 L2 引擎兼容（dsh.engine vs HOST_ENGINE_VERSION，semver includePrerelease）
 // 与 L3 展示合规三件套（icon / exports ./locale/* / exports ./package.json）。缓存条目缺 v:2 视为过期重探。
@@ -623,6 +702,84 @@ async function probeAll(items, cacheIn = null, opts = {}) {
   );
 }
 
+// ---- 1.6.0 tgz 镜像池（Zotero 中文社区模式，2026-10-12）----
+// 痛点：~6900 条 github 独源插件安装必须赌 github 直连网络窗口（真机实测主站 clone 间歇被 RST）。
+// 做法：CI 重建快照时把 github 独源条目的 tarball 预构建进 public/tgz/{owner}__{repo}.tgz，
+//   随仓库走 jsDelivr 国内可达分发（客户端 0.9.24 降级梯对带 tgz 字段条目优先走镜像，
+//   梯序 npm 同名包 → tgz 镜像 → codeload 直连 → 原通道重试）。
+// 范围 = scope 内 npm 为空条目（挂链成功的天生走 npm 通道，不需要镜像）；按 star 降序 + --tgz-limit
+//   截断（头部先覆盖 90%+ 安装请求，长尾每日增量补）；data/tgz-cache.json 记 sha256/bytes/pushedAt，
+//   pushedAt 未变直接复用产物零下载；单文件 >20MB 跳过（jsDelivr gh 单文件上限）；失败记录不阻断。
+// --no-tgz 跳过；产物不删除（仓库不再收录的孤儿文件仅在下轮报告，人工清理）。
+const TGZ_DIR = join(ROOT, 'public', 'tgz');
+const TGZ_CACHE_FILE = join(ROOT, 'data', 'tgz-cache.json');
+const TGZ_MAX_BYTES = 20 * 1024 * 1024;
+async function tgzPoolSweep(scope, args) {
+  const limitIdx = args.indexOf('--tgz-limit');
+  const limit = limitIdx > -1 ? Math.max(1, parseInt(args[limitIdx + 1], 10) || 2000) : 2000;
+  const targets = scope
+    .filter((x) => !x.npm && x.full_name)
+    .sort((a, b) => (b.stargazers_count || 0) - (a.stargazers_count || 0))
+    .slice(0, limit);
+  if (!targets.length) {
+    console.log('[tgz] 无 github 独源目标，跳过 tgz 池构建');
+    return { built: 0, reused: 0, failed: 0 };
+  }
+  await mkdir(TGZ_DIR, { recursive: true });
+  const cache = (await loadJsonSafe(TGZ_CACHE_FILE)) || {};
+  const { createHash } = await import('node:crypto');
+  let built = 0, reused = 0, failed = 0, done = 0;
+  const CONC = 5;
+  async function one(x) {
+    const file = x.full_name.replace('/', '__') + '.tgz';
+    const p = join(TGZ_DIR, file);
+    const pushedAt = x.pushed_at || x.updated_at || '';
+    const c = cache[x.full_name];
+    if (c && c.file === file && c.pushedAt === pushedAt && c.sha256 && !c.err) {
+      x.tgz = file; x.tgzSha256 = c.sha256; reused++; return;
+    }
+    try {
+      const res = await fetch(`https://codeload.github.com/${x.full_name}/tar.gz/HEAD`, {
+        signal: AbortSignal.timeout(60000),
+        headers: { 'user-agent': 'dsh-plugin-hub' },
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const reader = res.body.getReader();
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const { done: d, value } = await reader.read();
+        if (d) break;
+        total += value.length;
+        if (total > TGZ_MAX_BYTES) { reader.cancel(); throw new Error('oversize>' + TGZ_MAX_BYTES); }
+        chunks.push(Buffer.from(value));
+      }
+      const data = Buffer.concat(chunks);
+      await writeFile(p, data);
+      const sha256 = createHash('sha256').update(data).digest('hex');
+      cache[x.full_name] = { file, sha256, bytes: total, pushedAt };
+      x.tgz = file; x.tgzSha256 = sha256;
+      built++;
+    } catch (e) {
+      failed++;
+      cache[x.full_name] = { ...(c || {}), file, err: String(e.message || e).slice(0, 80), at: Date.now() };
+      delete x.tgz; delete x.tgzSha256; // 上轮挂过本轮失败的条目撤字段，客户端自然回退 github 通道
+    }
+  }
+  for (let i = 0; i < targets.length; i += CONC) {
+    await Promise.all(targets.slice(i, i + CONC).map(one));
+    done = Math.min(i + CONC, targets.length);
+    if (done % 100 === 0 || done === targets.length) {
+      console.log(`[tgz] 进度 ${done}/${targets.length}（新抓 ${built} 缓存复用 ${reused} 失败 ${failed}）`);
+      await writeFile(TGZ_CACHE_FILE, JSON.stringify(cache)).catch(() => {}); // 阶段性落盘，中断不丢进度
+    }
+  }
+  await writeFile(TGZ_CACHE_FILE, JSON.stringify(cache)).catch(() => {});
+  const orphans = (await readdir(TGZ_DIR).catch(() => [])).filter((f) => f.endsWith('.tgz')).length - built - reused;
+  console.log(`[tgz] 池构建完成: 新抓 ${built} / 缓存复用 ${reused} / 失败 ${failed}（限 ${limit}；>20MB 与 404 均计入失败，下轮重试）；孤儿文件约 ${Math.max(0, orphans)} 个`);
+  return { built, reused, failed };
+}
+
 // ---- main ----
 const args = process.argv.slice(2);
 const fromIdx = args.indexOf('--from-json');
@@ -727,6 +884,13 @@ if (prevSnapshot && Array.isArray(prevSnapshot.items) && prevSnapshot.items.leng
   const n = seedProbeCacheFromSnapshot(prevSnapshot, probeCache);
   console.log(`[probe] 从上次快照回种探测缓存: ${n} 条（7 天 TTL 内免冷探）`);
 }
+// 1.5.0 npm 同名挂链全量化（先于快筛：新挂链条目直接吃 sweep 写入的 npm 通道合规结论，免二次抓取）
+if (args.includes('--no-npm-link')) {
+  console.log('[npm-link] --no-npm-link：跳过同名挂链扫');
+} else {
+  const lr = await npmLinkSweep(items, probeCache);
+  console.log(`[npm-link] 同名挂链完成: 候选 ${lr.probed + lr.cached} 条（缓存命中 ${lr.cached} / 本轮实测 ${lr.probed} / 现挂链 ${lr.linked} / 负结果 ${lr.neg} / 网络故障 ${lr.err}）`);
+}
 if (!skipProbe) await probeAll(items, probeCache, { noColdNpm: MODE === 'incremental' });
 else await saveProbeCache(probeCache);
 
@@ -771,8 +935,7 @@ sortItems(scope);
 const dupCount = new Map();
 for (const x of scope) {
   const k = (x.full_name || '') + '\u0000' + (x.npm || '');
-  dupCount.set(k, (dupCount.get(k) || 0) + 1);
-}
+  dupCount.set(k, (dupCount.get(k) || 0) + 1);}
 const dupExtra = [...dupCount.values()].reduce((s, n) => s + (n - 1), 0);
 const dupRatio = scope.length ? dupExtra / scope.length : 0;
 if (dupExtra > 0) {
@@ -781,6 +944,13 @@ if (dupExtra > 0) {
   if (dupRatio > 0.01) console.log(`::warning::${msg}（阈值 1%，请检查上游抓取分页/探针附加逻辑）`);
   const dupSamples = [...dupCount.entries()].filter(([, n]) => n > 1).slice(0, 10);
   for (const [k, n] of dupSamples) console.log(`   - ${k.replace('\u0000', ' | npm=')} ×${n}`);
+}
+
+// 1.6.0 tgz 镜像池构建（写在 out 组装前：tgz/tgzSha256 字段随 scope 进快照，客户端降级梯消费）
+if (args.includes('--no-tgz')) {
+  console.log('[tgz] --no-tgz：跳过 tgz 镜像池构建');
+} else {
+  await tgzPoolSweep(scope, args);
 }
 
 const out = { version: 3, builtAt: Date.now(), quality: true, total: scope.length, items: scope };
