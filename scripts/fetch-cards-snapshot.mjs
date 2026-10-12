@@ -82,6 +82,7 @@
 //    快筛断点续跑：data/probe-cache.json（7 天有效），重跑只补缺。
 
 import { writeFile, readFile, mkdir, readdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import { satisfies, validRange } from 'semver';
@@ -735,7 +736,9 @@ async function tgzPoolSweep(scope, args) {
     const p = join(TGZ_DIR, file);
     const pushedAt = x.pushed_at || x.updated_at || '';
     const c = cache[x.full_name];
-    if (c && c.file === file && c.pushedAt === pushedAt && c.sha256 && !c.err) {
+    // 2026-10-12 修复：复用条件必须校验本地文件真实存在 —— CI 每轮 fresh checkout，
+    // 若产物曾因 git add 遗漏未入库，仅凭 cache 记录复用会永久零下载、快照带 tgz 字段而仓库无文件（jsDelivr 全 404）。
+    if (c && c.file === file && c.pushedAt === pushedAt && c.sha256 && !c.err && existsSync(p)) {
       x.tgz = file; x.tgzSha256 = c.sha256; reused++; return;
     }
     try {
