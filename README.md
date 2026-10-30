@@ -60,7 +60,7 @@ Gitee 仓库 → **服务 → Gitee Go** → 启用 `.gitee/workflows/dsh-hub.ym
 - **一仓一卡去重（1.4.2）**：仓库有 npm 包卡时不再输出 gh 裸卡（此前 16422 条中 2709 仓重复，dsh-market 一仓 4 卡占据 Top10 四席）；monorepo 多包仍各占一卡（每包=独立可装单元）
 - **增量构建（1.4.0）**：默认自动模式 —— 周日(UTC)/状态缺失/状态>6 天跑全量，其余每日只收割 `pushed:>=上次构建−12h` 的增量（基线=上次快照，缓存回种免冷探），CI 从 12~180 分钟降到分钟级；收割为 0 时中止不发布。显式指定用 `--full` / `--incremental`
 - **npm 深分页修复（1.4.1）**：npmjs search 的 `from+size` 上限 ≈5250，超过回绕开头（尾段包静默丢失）——连续 2 页无新包即转 npmmirror 深分页补尾（镜像仅支持纯文本，客户端按 `keywords=dsh-plugin` 过滤，npm 源 5250→6924 条）；search 429 不再切镜像（镜像不解析 `keywords:` 限定符会静默归零）；探测 git 通道 3 次 + 指数退避
-- 分层合规快筛（schema v3）：`dsh.bundle` 硬门禁（installable）→ `dsh.engine` 与桌面端 0.2.0-rc.2 semver 兼容判定（engineCompat，非法 range 一律不判不兼容）→ 展示三件套 metaScore（仅排序）
+- 分层合规快筛（schema v3）：`dsh.bundle` 硬门禁（installable）→ 官方 `engines.dsh`（缺失回退 `@deepseek-ai/dsh*` peerDependencies）与桌面端 0.2.1-rc.5 semver 兼容判定（engineCompat，空/非法 range 判不兼容）→ 展示三件套 metaScore（仅排序，其中 icon 项已从「字段存在」升级为「可加载」：相对路径 + 扩展名限 svg/png/jpe?g/webp，或导出 `./icon`）→ **平台声明 `dsh.bundle.platforms`（1.4.0 P0-1）**：原样采集到条目 `platforms` 字段；空数组 / 含非 Node 平台名 / 非数组判 `platformMalformed=true`（官方 `assertBundlePlatform` 抛错跳过该组合包 → 等效不可装，市场口径剔除）。**不按构建机平台过滤**——快照跨平台分发（CI 构建机是 linux），平台匹配交客户端按 `navigator.platform` 判定（见 dsh-plugin 客户端 `platformOk`）
 - 借星防护：npm 条目仅当 repository 指向 topic 收割到的仓库才合并富化；宿主本体仓（deepseek-ai/deepseek-harness）不借星
 - 手动重建：`node scripts/fetch-cards-snapshot.mjs`（全量，约 12 分钟起）或 `--skip-probe` 快速刷新；`workflow_dispatch` 可在 GitHub Actions 页手动触发云端构建
 
@@ -73,7 +73,7 @@ scripts/translate-snapshot.mjs     快照描述集中翻译（description_zh，t
 data/overrides.json        人工策展区：分类/中文名/安装命令修正（重跑不丢）
 data/tx-cache.json         翻译持久缓存（sha1(描述) → 中文，fetch.mjs 与 translate-snapshot 共享）
 data/seed.json             离线兜底种子
-data/probe-cache.json      快筛断点缓存（schema v2，7 天有效，随 master 提交）
+data/probe-cache.json      快筛断点缓存（schema v3：含 engineSchema/platformSchema 标记，旧口径条目强制重探；7 天有效，随 master 提交）
 public/index.html          前端（搜索/分类/排序/复制安装命令，分页 60/页）
 public/app.js
 public/style.css
