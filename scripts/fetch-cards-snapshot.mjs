@@ -2,24 +2,32 @@
 //
 // 数据口径（1.2.0，按官方要求出发）：
 //   官方无插件注册表；「符合官方要求可安装」的唯一权威标准是宿主 app-boot 硬门禁：
-//   package.json 必须声明 dsh.bundle（缺失拒绝安装）+ semver version + dsh.engine 兼容。
+//   package.json 必须声明 dsh.bundle（缺失拒绝安装）+ semver version + engines.dsh 兼容。
 //   发现层双源：
 //     源 A（主力）: npm keywords:dsh-plugin —— 天然带版本号、天然可安装包形态（6091+）
 //     源 B:        GitHub topic:dsh-plugin（质量口径 ★>=0 + 12mo + dsh kw）—— git 安装通道 + stars/topics
 //                  1.1.0：★>=3 → ★>=0（用户决策 2026-09-30：目录须完整覆盖官方 topic 页，不按星数筛）。
 //   快筛：npm 包读 registry <pkg>/latest 的完整 manifest（含自定义 dsh 字段）；git 仓库读 raw package.json。
 //   1.2.0 分层合规（L2 引擎兼容 + L3 展示合规，官方规则口径）：
-//     engineCompat: dsh.engine 与桌面端运行时（HOST_ENGINE_VERSION）semver 相交判定
-//                   （1=兼容 / 0=不兼容 / null=未声明或解析失败，客户端只过滤 0）；
+//     engineCompat: 官方字段 engines.dsh（SemVer range）与桌面端运行时（HOST_ENGINE_VERSION）判定；
+//                   缺失 engines.dsh 时回退 peerDependencies 中 @deepseek-ai/dsh 与 @deepseek-ai/dsh-*；
+//                   （1=兼容 / 0=不兼容或空/非法 range / null=未声明，客户端只过滤 0）；
 //     metaScore:    0.2.0 展示规范三件套计分（icon / exports ./locale/* / exports ./package.json，0-3），
 //                   仅参与排序权重，不做过滤；
-//     探针缓存 schema v2（新增 engine/engineCompat/metaScore 字段），旧缓存条目自动重探。
+//     iconOk:       P0-2（2026-10-31）：icon 合规从「字段存在」升级为「可加载」——相对路径（无 scheme/绝对/..）
+//                   + 扩展名受限（svg/png/jpe?g/webp）+ 或导出 ./icon；体积/files 覆盖留 P2；
+//     platforms:    P0-1（2026-10-31）：dsh.bundle.platforms 声明（Node 平台名数组，省略=全平台）；
+//     platformMalformed: 声明格式非法（空数组/含非 Node 平台名）→ 官方 bundle-platform 抛错跳过，等效不可装；
+//     ⚠️ 平台「是否匹配当前用户」不在此处判定（快照跨平台分发，CI 构建机是 linux），交客户端按
+//       自身 navigator.platform 过滤（dsh-plugin 客户端 platformOk 纯函数）。
+//     探针缓存 schema v3（2026-10-31 引擎口径修正：dsh.engine → 官方 engines.dsh，旧条目强制重探）。
 //   归并校验（1.1.0）：npm 条目仅当 repository 指向「源 B 收割到的 topic 仓库」才合并富化
 //   （stars/topics/updated_at，source=both）；指向宿主本体仓（HOST_REPOS）的一律视为无仓库
 //   （不借官方主仓星数冒充出品）。source=npm 的条目 = 不在官方 topic 页，由客户端默认视图隐藏。
 //   1.3.0 市场口径（用户决策 2026-10-11）：快照只收录「官方 topic:dsh-plugin 内、通过官方硬门禁」的仓库
 //   —— 产出前剔除 npm 独立条目（source=npm）、未声明 dsh.bundle（installable=false）、
-//   探测失败（null，下轮重建补回）与引擎不兼容（engineCompat=0）。快照 = 市场内容，口径在数据源侧收口。
+//   探测失败（null，下轮重建补回）、引擎不兼容（engineCompat=0）与平台声明非法（platformMalformed）。
+//   快照 = 市场内容，口径在数据源侧收口。
 //   1.5.0 npm 同名挂链全量化（2026-10-12，用户需求「不开 VPN 也要能装」）：
 //     对 gh 裸卡（source=github 且 npm=''）按「仓库名=npm 包名」惯例全量探测 npmmirror，
 //     命中（同名 + repository 一致或缺失 + 声明 dsh.bundle）即挂链 → 客户端安装走 npm 稳定通道。
@@ -66,7 +74,7 @@
 // 产出 public/cards-snapshot.json：
 //   { version:3, builtAt, quality:true, total,
 //     items:[{ full_name, npm, name, version, installable, source, stargazers_count, updated_at, description, topics,
-//              engine, engineCompat, metaScore }] }
+//              engine, engineCompat, metaScore, iconOk, platforms, platformMalformed }] }
 //   installable: true（声明 dsh.bundle）/ false（未声明）/ null（探测失败，客户端按未校验显示）
 //
 // 用法：
@@ -95,7 +103,20 @@ const STATE_FILE = join(ROOT, 'data', 'harvest-state.json');
 // 1.4.0 增量模式收割窗口起点（ISO 日期）；null = 默认近 12 个月全量窗口
 let BASE_PUSHED_AFTER = null;
 // 1.2.0 引擎兼容判定的宿主基准版本（与 DSH Desktop 运行时 desktopVersion 对齐，发版时同步更新）
-const HOST_ENGINE_VERSION = '0.2.0-rc.2';
+// 2026-10-31 依宿主二进制 @deepseek-ai/dsh-desktop-runtime package.json 实测值更新
+const HOST_ENGINE_VERSION = '0.2.1-rc.5';
+// 探针缓存 schema：v3（2026-10-31 引擎口径修正：官方读 engines.dsh，旧 v2 条目强制重探）
+const PROBE_SCHEMA = 3;
+// engineCompat 口径版本：与旧 dsh.engine 口径区分，旧快照回种条目强制重探
+const ENGINE_SCHEMA = 3;
+// P0-1 platform 口径版本：dsh.bundle.platforms 为 2026-10-31 新增采集字段，旧快照回种条目强制重探
+const PLATFORM_SCHEMA = 1;
+// P0-1（2026-10-31 官方规则审计）：dsh.bundle.platforms —— 官方 Node 平台名（与 app-boot bundle-platform.ts 同源）
+//   省略（undefined）= 全平台；非空字符串数组且值全在 NODE_PLATFORMS 内 = 合法；合法且含当前宿主平台 = 可加载。
+//   ⚠️ 快照是跨平台分发的（CI 构建机是 linux），故此处只记录声明 + 判「格式非法」，**不在市场口径按构建机平台过滤**
+//   （否则 win32-only / darwin-only 插件会被 linux CI 整批删掉）。客户端按用户真实平台过滤。
+const NODE_PLATFORMS = ['aix', 'android', 'darwin', 'freebsd', 'haiku', 'linux', 'openbsd', 'sunos', 'win32', 'cygwin', 'netbsd'];
+const HOST_PLATFORM = process.platform; // 仅用于构建诊断/报告
 
 const TOKEN = process.env.GITHUB_TOKEN || '';
 const GH_HEADERS = { Accept: 'application/vnd.github+json', 'User-Agent': 'dsh-plugin-hub-snapshot' };
@@ -554,7 +575,7 @@ async function npmLinkSweep(items, cache) {
         cache[k] = { v: 2, linked: true, ts: Date.now() };
         it.npm = it.name; it.source = 'both'; linked++;
         // 顺带把 npm manifest 合规结论写进探测缓存 → probeAll 命中免再抓（与 npm 通道快筛同源同键）
-        cache['npm:' + it.name] = { ...manifestCompliance(res.manifest), v: 2 };
+        cache['npm:' + it.name] = { ...manifestCompliance(res.manifest), v: PROBE_SCHEMA };
       } else err++; // miss=null 网络故障：不缓存，下轮重试
       if (idx % 500 === 0) console.log(`[npm-link] 进度 ${idx}/${targets.length}（已挂 ${linked}）`);
     }
@@ -563,28 +584,80 @@ async function npmLinkSweep(items, cache) {
   return { linked, neg, cached, err, probed: targets.length - cached };
 }
 
-// ---- 快筛：dsh.bundle 声明 + version + 分层合规字段（带 7 天断点缓存，schema v2）----
-// 1.2.0：从 manifest 提取 L2 引擎兼容（dsh.engine vs HOST_ENGINE_VERSION，semver includePrerelease）
-// 与 L3 展示合规三件套（icon / exports ./locale/* / exports ./package.json）。缓存条目缺 v:2 视为过期重探。
+// ---- 快筛：dsh.bundle 声明 + version + 分层合规字段（带 7 天断点缓存，schema v3）----
+// 1.2.0：L2 引擎兼容（官方口径 2026-10-31 修正）：
+//   - 官方字段为 engines.dsh（SemVer range）；宿主不读 dsh.engine（app.asar 字节级检索 0 命中实证）；
+//   - engines.dsh 存在即唯一决定；缺失时回退 peerDependencies 中所有 @deepseek-ai/dsh 与 @deepseek-ai/dsh-* 范围；
+//   - 空 range / 非法 range 官方判不兼容（0），旧实现误判为 null；
+//   - 无任何声明 → null（未声明，客户端不过滤）。
+// 与 L3 展示合规三件套（icon / exports ./locale/* / exports ./package.json）。缓存条目缺 v:3 视为过期重探。
 function manifestCompliance(m) {
   const dsh = m && m.dsh ? m.dsh : null;
-  const engine = dsh && typeof dsh.engine === 'string' ? dsh.engine.trim() : '';
+  // engines 对象存在性：官方要求为对象，否则视为格式非法
+  const engines = m && m.engines && typeof m.engines === 'object' ? m.engines : null;
+  const depEngines = m && m.peerDependencies && typeof m.peerDependencies === 'object' ? m.peerDependencies : null;
+  let engine = '';
   let engineCompat = null;
-  if (engine) {
-    // 1.2.1 修复：官方惯例 engine 写作 "dsh >=x.y.z"，须剥掉 "dsh" 前缀再判；
-    // 且 semver.satisfies 对非法 range 不抛异常而是返回 false（catch 兜底无效）——必须先 validRange 校验。
-    const range = engine.replace(/^dsh\s*/i, '').trim();
-    engineCompat = validRange(range, { includePrerelease: true })
-      ? (satisfies(HOST_ENGINE_VERSION, range, { includePrerelease: true }) ? 1 : 0)
-      : null; // 非法 range 不判不兼容，交给宿主安装时终审
+  const declared = engines && typeof engines.dsh === 'string' ? engines.dsh.trim() : null;
+  if (declared !== null) {
+    engine = declared;
+    // 空串显式判不兼容：semver.validRange('') 返回 '*'（truthy），不能依赖它
+    engineCompat = declared && validRange(declared, { includePrerelease: true })
+      ? (satisfies(HOST_ENGINE_VERSION, declared, { includePrerelease: true }) ? 1 : 0)
+      : 0; // 空/非法 range 官方判不兼容
+  } else if (depEngines) {
+    // 回退：@deepseek-ai/dsh 与 @deepseek-ai/dsh-* 的每个 peerDependencies 范围都必须满足
+    const ranges = Object.keys(depEngines)
+      .filter((k) => k === '@deepseek-ai/dsh' || k.startsWith('@deepseek-ai/dsh-'))
+      .map((k) => String(depEngines[k]).trim());
+    if (ranges.length) {
+      engine = ranges.join(' ');
+      const bad = ranges.some((r) => !r || !validRange(r, { includePrerelease: true }));
+      engineCompat = bad ? 0 : (ranges.every((r) => satisfies(HOST_ENGINE_VERSION, r, { includePrerelease: true })) ? 1 : 0);
+    }
   }
   let metaScore = 0;
   const exp = (m && m.exports) || {};
   const expKeys = Object.keys(exp);
-  if (m && m.icon) metaScore++;
+  // P0-2（2026-10-31 官方规则审计）：icon 约束从「字段存在」升级为「可加载」。
+  //   官方 plugin-detail / adding-a-package：图标经 package.json.icon（相对路径，不含 ../ 与 URL scheme）
+  //   或导出的 ./icon 解析；允许 SVG/PNG/JPEG/WebP。本机快筛只做「存在性 + 路径合法性 + 扩展名」，
+  //   体积 ≤256KiB 与 files 覆盖校验留 P2（需拉取文件清单，成本高）。
+  const iconPath = (m && typeof m.icon === 'string') ? m.icon.trim() : '';
+  const iconRelOk = iconPath
+    && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(iconPath)                 // 无 URL scheme（http:、data: …）
+    && !iconPath.startsWith('/')                                    // 非绝对路径
+    && !iconPath.split(/[\\/]/).some((s) => s === '..')             // 无 .. 段
+    && /\.(svg|png|jpe?g|webp)$/i.test(iconPath);                   // 扩展名受限
+  const iconExportOk = !!(exp && exp['./icon']);                    // 或导出 ./icon
+  const iconOk = iconRelOk || iconExportOk;
+  if (iconOk) metaScore++;
   if (expKeys.some((k) => k === './locale/*.json' || k.startsWith('./locale/'))) metaScore++;
   if (exp['./package.json']) metaScore++;
-  return { installable: !!(dsh && dsh.bundle), version: (m && m.version) || '', engine, engineCompat, metaScore, ts: Date.now() };
+
+  // P0-1（2026-10-31 官方规则审计）：dsh.bundle.platforms 采集 + 校验（官方 bundle-platform.ts 同源口径）。
+  //   省略（键不存在 / undefined）= 全平台；非空字符串数组且值全为合法 Node 平台名 = 合法；
+  //   空数组 / 含非 Node 平台名 / 非数组（含 null）= 格式非法（官方抛错跳过该组合包 → 等效不可装）。
+  const bManifest = dsh && dsh.bundle && typeof dsh.bundle === 'object' ? dsh.bundle : null;
+  const rawPlatforms = bManifest ? bManifest.platforms : undefined;
+  let platforms = null;
+  let platformMalformed = false;
+  if (rawPlatforms !== undefined) {
+    if (Array.isArray(rawPlatforms)) {
+      platforms = rawPlatforms.slice();
+      platformMalformed = rawPlatforms.length === 0
+        || !rawPlatforms.every((v) => typeof v === 'string' && NODE_PLATFORMS.includes(v));
+    } else {
+      platformMalformed = true; // 非数组（null/string/number…）：官方 Array.isArray 校验失败
+    }
+  }
+
+  return {
+    installable: !!(dsh && dsh.bundle), version: (m && m.version) || '', engine, engineCompat,
+    metaScore, iconOk,
+    platforms, platformMalformed,
+    engineSchema: ENGINE_SCHEMA, platformSchema: PLATFORM_SCHEMA, ts: Date.now(),
+  };
 }
 
 async function loadProbeCache() {
@@ -604,11 +677,11 @@ async function probeManifest(item, cache, opts = {}) {
   if (item.full_name) keys.push('gh:' + item.full_name);
   for (const k of keys) {
     const hit = cache[k];
-    if (hit && hit.v === 2 && Date.now() - hit.ts < PROBE_TTL_MS && hit.installable !== null) return { ...hit, from: k };
+    if (hit && hit.v === PROBE_SCHEMA && Date.now() - hit.ts < PROBE_TTL_MS && hit.installable !== null && (hit.installable !== true || (hit.engineSchema === ENGINE_SCHEMA && hit.platformSchema === PLATFORM_SCHEMA))) return { ...hit, from: k };
   }
   // 1.4.0 增量模式：npm 独立包不做冷探（新包留 null → 市场口径自然排除；哨兵完整审计以全量为准）
   if (noColdNpm && !item.full_name) {
-    return { installable: null, version: item.version || '', engine: '', engineCompat: null, metaScore: 0, ts: Date.now(), coldSkipped: true };
+    return { installable: null, version: item.version || '', engine: '', engineCompat: null, metaScore: 0, iconOk: false, platforms: null, platformMalformed: false, engineSchema: ENGINE_SCHEMA, platformSchema: PLATFORM_SCHEMA, ts: Date.now(), coldSkipped: true };
   }
   // npm 通道：registry latest manifest 含全部自定义字段
   if (item.npm) {
@@ -616,7 +689,7 @@ async function probeManifest(item, cache, opts = {}) {
       const r = await fetch(`https://registry.npmmirror.com/${encodeURIComponent(item.npm)}/latest`, { signal: AbortSignal.timeout(10000) });
       if (r.ok) {
         const m = await r.json();
-        const res = { ...manifestCompliance(m), v: 2 };
+        const res = { ...manifestCompliance(m), v: PROBE_SCHEMA };
         cache['npm:' + item.npm] = res;
         return { ...res, from: 'npm:' + item.npm };
       }
@@ -629,10 +702,10 @@ async function probeManifest(item, cache, opts = {}) {
       try {
         const r = await fetch(`https://raw.githubusercontent.com/${item.full_name}/HEAD/package.json`,
           { signal: AbortSignal.timeout(9000) });
-        if (r.status === 404) { const res = { installable: false, version: '', engine: '', engineCompat: null, metaScore: 0, ts: Date.now(), v: 2 }; cache['gh:' + item.full_name] = res; return res; }
+        if (r.status === 404) { const res = { installable: false, version: '', engine: '', engineCompat: null, metaScore: 0, iconOk: false, platforms: null, platformMalformed: false, engineSchema: ENGINE_SCHEMA, platformSchema: PLATFORM_SCHEMA, ts: Date.now(), v: PROBE_SCHEMA }; cache['gh:' + item.full_name] = res; return res; }
         if (r.ok) {
           const m = await r.json();
-          const res = { ...manifestCompliance(m), v: 2 };
+          const res = { ...manifestCompliance(m), v: PROBE_SCHEMA };
           cache['gh:' + item.full_name] = res;
           return res;
         }
@@ -640,7 +713,7 @@ async function probeManifest(item, cache, opts = {}) {
       } catch { await sleep(500); }
     }
   }
-  return { installable: null, version: item.version || '', engine: '', engineCompat: null, metaScore: 0, ts: Date.now() };
+  return { installable: null, version: item.version || '', engine: '', engineCompat: null, metaScore: 0, iconOk: false, platforms: null, platformMalformed: false, engineSchema: ENGINE_SCHEMA, platformSchema: PLATFORM_SCHEMA, ts: Date.now() };
 }
 
 // 1.4.0：上次快照自带探测结论 → 回种缓存（ts=快照 builtAt，7 天 TTL 内等效命中，免冷探）
@@ -651,18 +724,25 @@ function seedProbeCacheFromSnapshot(prev, cache) {
   for (const it of prev.items || []) {
     if (it.installable == null) continue;
     const val = {
-      v: 2,
+      v: PROBE_SCHEMA,
+      // 2026-10-31：旧快照 engine 为 dsh.engine 口径，置 2 强制重探官方 engines.dsh
+      engineSchema: 2,
+      // P0-1：dsh.bundle.platforms 为 2026-10-31 新增采集字段，置 0 强制重探（旧快照无此字段）
+      platformSchema: 0,
       installable: it.installable === true,
       version: it.version || '',
       engine: it.engine || '',
       engineCompat: typeof it.engineCompat === 'number' ? it.engineCompat : null,
       metaScore: typeof it.metaScore === 'number' ? it.metaScore : 0,
+      iconOk: it.iconOk === true,
+      platforms: Array.isArray(it.platforms) ? it.platforms.slice() : null,
+      platformMalformed: it.platformMalformed === true,
       ts,
     };
     for (const k of [it.npm ? 'npm:' + it.npm : '', it.full_name ? 'gh:' + it.full_name : '']) {
       if (!k) continue;
       const hit = cache[k];
-      if (hit && hit.v === 2 && Date.now() - hit.ts < PROBE_TTL_MS && hit.installable !== null) continue;
+      if (hit && hit.v === PROBE_SCHEMA && Date.now() - hit.ts < PROBE_TTL_MS && hit.installable !== null) continue;
       cache[k] = val;
       seeded++;
     }
@@ -687,6 +767,9 @@ async function probeAll(items, cacheIn = null, opts = {}) {
       it.engine = res.engine || '';
       it.engineCompat = typeof res.engineCompat === 'number' ? res.engineCompat : null;
       it.metaScore = typeof res.metaScore === 'number' ? res.metaScore : 0;
+      it.iconOk = res.iconOk === true; // P0-2：icon 声明合规（相对路径/扩展名/导出 ./icon）
+      it.platforms = Array.isArray(res.platforms) ? res.platforms.slice() : null; // P0-1：dsh.bundle.platforms 声明
+      it.platformMalformed = res.platformMalformed === true; // P0-1：格式非法 → 官方抛错跳过，等效不可装
       done++;
       if (res.installable === true) ok++; else if (res.installable === false) notOk++; else unknown++;
       if (done % 250 === 0) {
@@ -903,17 +986,22 @@ const dedupedItems = dedupAfterProbe(items);
 
 // 1.3.0 市场口径（用户决策 2026-10-11）：快照只收录「官方 topic:dsh-plugin 内、通过官方硬门禁」的仓库。
 //   剔除 source=npm（不在 topic 页的 npm 独立包；npm 源已通过 merge 为 topic 仓库富化版本/可装信息）、
-//   installable=false（未声明 dsh.bundle，宿主拒装）、engineCompat=0（引擎不兼容，装上即坏）。
+//   installable=false（未声明 dsh.bundle，宿主拒装）、engineCompat=0（engines.dsh 不兼容，装上即坏）、
+//   platformMalformed=true（dsh.bundle.platforms 格式非法，官方 bundle-platform 抛错跳过该组合包）。
 //   installable=null（探测失败）同样剔除，交下一轮每日重建自然补回。
+//   ⚠️ P0-1：dsh.bundle.platforms **声明**照收（含 win32/darwin 等其它平台）——快照是跨平台分发产物
+//   （CI 构建机是 linux），在此按构建机平台过滤会整批删掉其它平台专用插件。平台「是否匹配」交客户端
+//   按自身 navigator.platform 判定（见 dsh-plugin 客户端 platformOk 纯函数）。
 //   --skip-probe（快速刷新）时无快筛数据，只剔 npm 侧、不做可装过滤（产物仅供调试，不发布）。
 const nNpmOnly = dedupedItems.filter((x) => x.source === 'npm').length;
 const nNotInst = dedupedItems.filter((x) => x.source !== 'npm' && x.installable === false).length;
 const nUnknown = dedupedItems.filter((x) => x.source !== 'npm' && x.installable == null).length;
 const nIncompat = dedupedItems.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat === 0).length;
+const nPlatBad = dedupedItems.filter((x) => x.source !== 'npm' && x.installable === true && x.platformMalformed === true).length;
 const scope = skipProbe
   ? dedupedItems.filter((x) => x.source !== 'npm')
-  : dedupedItems.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat !== 0);
-console.log(`市场口径过滤：${dedupedItems.length} → ${scope.length}（npm 独立 ${nNpmOnly}，未声明 bundle ${nNotInst}，探测失败 ${nUnknown}，引擎不兼容 ${nIncompat}${skipProbe ? '，skip-probe 未做可装过滤' : ''}）`);
+  : dedupedItems.filter((x) => x.source !== 'npm' && x.installable === true && x.engineCompat !== 0 && x.platformMalformed !== true);
+console.log(`市场口径过滤：${dedupedItems.length} → ${scope.length}（npm 独立 ${nNpmOnly}，未声明 bundle ${nNotInst}，探测失败 ${nUnknown}，引擎不兼容 ${nIncompat}，平台声明非法 ${nPlatBad}${skipProbe ? '，skip-probe 未做可装过滤' : ''}）`);
 
 // 1.3.1 npm 侧哨兵（方案 C 第 2 层，2026-10-11）：发现「声明了 dsh.bundle 但不在官方 topic 页」的包，仅记录不收录。
 //   出路：① 作者补打 topic:dsh-plugin → 下轮自动收录（口径自愈）；② 确认值得收录的走种子白名单（第 3 层，待定）。
@@ -956,7 +1044,7 @@ if (args.includes('--no-tgz')) {
   await tgzPoolSweep(scope, args);
 }
 
-const out = { version: 3, builtAt: Date.now(), quality: true, total: scope.length, items: scope };
+const out = { version: 3, engineSchema: ENGINE_SCHEMA, platformSchema: PLATFORM_SCHEMA, builtAt: Date.now(), quality: true, total: scope.length, items: scope };
 await writeFile(OUT, JSON.stringify(out));
 
 // 1.4.0：产物成功写出后才推进增量窗口。--from-json（离线重建）与 --skip-probe（未做可装判定，
