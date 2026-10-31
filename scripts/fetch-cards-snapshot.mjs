@@ -876,19 +876,24 @@ async function loadJsonSafe(p) {
   try { return JSON.parse(await readFile(p, 'utf8')); } catch { return null; }
 }
 
-// 1.4.0 构建模式判定：--full/--incremental 显式；自动 = 周日(UTC) 或 无状态 或 状态>6天 或 缺上次快照 → 全量
+// 1.4.0 构建模式判定：--full/--incremental 显式；自动 = 周日(UTC) 或 无状态 或 全量超 6 天 或 缺上次快照 → 全量
+// 2026-10-31 加固：年龄判定改用 lastFullAt。此前用 lastHarvestAt——增量每轮推进，6 天阈值永不触发，
+// 周日构建失败即出现最长 14 天全量空窗（增量窗口只覆盖 pushed 变化，描述/topics/stars 陈旧不刷新）。
+// lastFullAt 仅在全量成功后推进，保证全量周期上限 6 天。
 let state = await loadJsonSafe(STATE_FILE);
 const prevSnapshot = await loadJsonSafe(OUT);
-const stateFresh = !!(state && state.lastHarvestAt && BUILD_START - state.lastHarvestAt < 6 * 864e5);
+const harvestAt = state && state.lastHarvestAt ? state.lastHarvestAt : 0;
+const lastFullAt = state && state.lastFullAt ? state.lastFullAt : 0;
+const fullAged = !!lastFullAt && BUILD_START - lastFullAt >= 6 * 864e5;
 let MODE = args.includes('--full')
   ? 'full'
   : args.includes('--incremental')
     ? 'incremental'
-    : new Date().getUTCDay() === 0 || !stateFresh || !prevSnapshot
+    : new Date().getUTCDay() === 0 || !harvestAt || fullAged || !prevSnapshot
       ? 'full'
       : 'incremental';
 console.log(
-  `[mode] 构建模式: ${MODE}（周日(UTC)/无状态/状态>6天/缺上次快照 → 全量；--full/--incremental 可显式指定）`
+  `[mode] 构建模式: ${MODE}（周日(UTC)/无状态/全量超6天/缺上次快照 → 全量；--full/--incremental 可显式指定）`
 );
 
 let npmMap = new Map();

@@ -92,7 +92,16 @@ jobs:
             echo "无变更，跳过提交"
           else
             git commit -m "chore: daily snapshot $(date -u +'%Y-%m-%d')"
-            git push
+            # 2026-10-31 run#87 修复：workflow_dispatch 排队排在 push 触发的 #86 之后串行执行，
+            # 但 checkout 的 head_sha 早于 #86 的提交（均为 5d51fc26），build 期间远端 master 已
+            # 前进到 62626a9 → 本地提交非快进，git push 被拒（non-fast-forward）→ 步骤标红。
+            # 修复：push 前 fetch 远端最新 master；先试普通快进，被拒时用 --force-with-lease 覆盖。
+            # master 是 CI 单写者快照分支，晚到的构建即更新的真相；lease 防止覆盖他人/他 run 的提交。
+            git fetch origin master
+            if ! git push origin master; then
+              echo "::warning::快照提交非快进（并发运行已推进 master），改用 --force-with-lease 覆盖"
+              git push --force-with-lease origin master
+            fi
           fi
 
       - name: 清除 jsDelivr CDN 缓存（免鉴权 purge 接口，秒级生效）
